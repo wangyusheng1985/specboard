@@ -1,0 +1,35 @@
+services:
+  specboard:
+    image: specboard:local
+    build: .
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      DATA_DIR: /data
+      SESSION_DIR: /sessions
+      WORKSPACE_ROOT: /workspaces
+      API_SECRET: ${API_SECRET:?Set API_SECRET in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+      GITLAB_ALLOWED_HOSTS: ${GITLAB_ALLOWED_HOSTS:-gitlab.com}
+      PI_PROVIDER: ${PI_PROVIDER:-}
+      PI_MODEL: ${PI_MODEL:-}
+      PI_API_KEY: ${PI_API_KEY:-}
+      PI_AGENT_DIR: /data/pi
+      REQUEST_WINDOW_MS: ${REQUEST_WINDOW_MS:-60000}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    volumes:
+      - data:/data
+      - sessions:/sessions
+      - workspaces:/workspaces
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+volumes:
+  data:
+  sessions:
+  workspaces:

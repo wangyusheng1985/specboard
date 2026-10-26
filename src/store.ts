@@ -1,10 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 
-export const stages = ['Explore', 'Propose', 'Apply', 'Archive'] as const;
+export const stages = ['Explore', 'Propose', 'Apply', 'MR', 'Archive'] as const;
 export type Stage = typeof stages[number];
 export type RunStatus = 'queued' | 'running' | 'waiting_input' | 'paused' | 'failed' | 'completed' | 'stopped' | 'interrupted';
-export interface Project { id: string; name: string; repositoryUrl: string; encryptedToken: string; defaultBranch: string; workspaceRoot: string }
+export interface Project { id: string; name: string; repositoryUrl: string; encryptedToken: string; defaultBranch: string; workspaceRoot: string; deletedAt?: number | null }
 export interface Task { id: string; projectId: string; description: string; stage: Stage; status: RunStatus; version: number; stageEnteredAt: number }
 
 export class Store {
@@ -13,7 +13,7 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, repository_url TEXT NOT NULL, encrypted_token TEXT NOT NULL, default_branch TEXT NOT NULL, workspace_root TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), description TEXT NOT NULL, stage TEXT NOT NULL CHECK(stage IN ('Explore','Propose','Apply','Archive')), status TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0, stage_entered_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), description TEXT NOT NULL, stage TEXT NOT NULL CHECK(stage IN ('Explore','Propose','Apply','MR','Archive')), status TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0, stage_entered_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS lane_order ON tasks(stage,stage_entered_at,id);
       CREATE TABLE IF NOT EXISTS stage_runs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), stage TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER, ended_at INTEGER, step TEXT, result TEXT, error TEXT);
       CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), stage TEXT NOT NULL, session_path TEXT, cwd TEXT NOT NULL, skill_version TEXT NOT NULL, UNIQUE(task_id,stage));
@@ -23,6 +23,11 @@ export class Store {
       CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), type TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, result TEXT);
       CREATE TABLE IF NOT EXISTS transition_proposals(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),stage TEXT NOT NULL,target TEXT NOT NULL,version INTEGER NOT NULL,confirmed INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS security_events(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,category TEXT NOT NULL,request_id TEXT);
+      CREATE TABLE IF NOT EXISTS auth_tokens(id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, scope TEXT NOT NULL, run_id TEXT, generation INTEGER, expires_at INTEGER NOT NULL, revoked_at INTEGER);
+      CREATE TABLE IF NOT EXISTS agent_runs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), stage TEXT NOT NULL, generation INTEGER NOT NULL, status TEXT NOT NULL, lease_expires_at INTEGER NOT NULL, heartbeat_at INTEGER, container_id TEXT, agent_token_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(task_id,stage,generation));
+      CREATE TABLE IF NOT EXISTS run_events(run_id TEXT NOT NULL REFERENCES agent_runs(id), generation INTEGER NOT NULL, sequence INTEGER NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(run_id,generation,sequence));
+      CREATE TABLE IF NOT EXISTS run_commands(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id), type TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, delivered_at INTEGER, acknowledged_at INTEGER);
+      CREATE TABLE IF NOT EXISTS dispatch_leases(run_id TEXT PRIMARY KEY REFERENCES agent_runs(id), owner TEXT NOT NULL, lease_expires_at INTEGER NOT NULL);
     `);
     const columns=this.db.prepare('PRAGMA table_info(tasks)').all().map(row=>row.name);
     if(!columns.includes('updated_at'))this.db.exec('ALTER TABLE tasks ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0');
@@ -57,7 +62,7 @@ export class Store {
     return this.transaction(() => {
       const task = this.task(id);
       if (task.version !== expectedVersion) throw new Error('Version conflict');
-      if (!stages.includes(next) || stages.indexOf(next) !== stages.indexOf(task.stage) + 1) throw new Error('Invalid transition');
+      if (!stages.includes(next) || (stages.indexOf(next) !== stages.indexOf(task.stage) + 1 && !(task.stage === 'Apply' && next === 'Archive'))) throw new Error('Invalid transition');
       if (task.status === 'running') throw new Error('Stop active execution before transition');
       this.db.prepare("UPDATE tasks SET stage=?,status='queued',version=version+1,stage_entered_at=?,updated_at=? WHERE id=?").run(next, Date.now(),Date.now(), id);
       this.event(id, next, 'transition', { from: task.stage, to: next });

@@ -21,8 +21,8 @@ function toolEnvironment(){
 export interface AgentHandle { prompt(text:string):Promise<void>; steer(text:string):Promise<unknown>; abort():Promise<void>; dispose():void; text():string; }
 export type AgentFactory = (task: Task, emit:(type:string,payload:unknown)=>void, requestTransition:(target:Stage)=>void) => Promise<AgentHandle>;
 const require=createRequire(import.meta.url);
-const skillFiles: Record<Stage,string>={Explore:'explore',Propose:'propose',Apply:'apply-change',Archive:'archive-change'};
-const skillFunctions: Record<Stage,string>={Explore:'getExploreSkillTemplate',Propose:'getOpsxProposeSkillTemplate',Apply:'getApplyChangeSkillTemplate',Archive:'getArchiveChangeSkillTemplate'};
+const skillFiles: Record<Stage,string>={Explore:'explore',Propose:'propose',Apply:'apply-change',MR:'apply-change',Archive:'archive-change'};
+const skillFunctions: Record<Stage,string>={Explore:'getExploreSkillTemplate',Propose:'getOpsxProposeSkillTemplate',Apply:'getApplyChangeSkillTemplate',MR:'getApplyChangeSkillTemplate',Archive:'getArchiveChangeSkillTemplate'};
 
 export function piFactory(store:Store, workspaces:Workspaces, sessionsRoot:string, agentDir:string): AgentFactory {
  return async(task,emit,requestTransition)=>{
@@ -51,10 +51,10 @@ export function piFactory(store:Store, workspaces:Workspaces, sessionsRoot:strin
   const project=workspaces.project(task.projectId);
   const resourceLoader=new DefaultResourceLoader({cwd,agentDir,settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,
    appendSystemPromptOverride:()=>[content,`You are executing stage ${task.stage} for task ${task.id}. Change name: task-${task.id}. Project: ${project.name}. Stay in this stage. Never advance automatically. Call request_stage_transition only for an explicit user transition request; the host will ask for confirmation. Do not push, merge, deploy, or change remote resources without an explicit user instruction. End with results, validation evidence and blockers.`,
-    'The host stage transition is authorization to perform this stage within the task worktree. Ask substantive questions in the conversation and stop to await input. Explore is read-only. Propose writes planning artifacts only. Apply implements the selected change. Archive checks completion then archives that change.']});
+    'The host stage transition is authorization to perform this stage within the task worktree. Ask substantive questions in the conversation and stop to await input. Explore can generate prototype or summary artifacts when helpful. Propose writes planning artifacts only. Apply implements the selected change. Archive checks completion then archives that change.']});
   await resourceLoader.reload();
   const {session}=await createAgentSession({cwd,agentDir,modelRuntime:runtime,model,resourceLoader,settingsManager:settings,sessionManager,
-   tools:task.stage==='Explore'?['read','grep','find','ls','openspec','request_stage_transition']:['read','grep','find','ls','bash','edit','write','request_stage_transition'],
+   tools:task.stage==='Explore'?['read','grep','find','ls','edit','write','openspec','request_stage_transition']:['read','grep','find','ls','bash','edit','write','request_stage_transition'],
    customTools:[createBashToolDefinition(cwd,{spawnHook:context=>({...context,env:toolEnvironment()})}) as unknown as ToolDefinition,{name:'openspec',label:'OpenSpec read-only CLI',description:'Read OpenSpec changes, specs, status and instructions without mutating files.',parameters:Type.Object({command:Type.Union(['list','status','show','instructions','validate','context'].map(s=>Type.Literal(s))),args:Type.Array(Type.String())}),execute:async(_id,params)=>{
     const input=params as {command:string;args:string[]};
     if(!['list','status','show','instructions','validate','context'].includes(input.command)||input.args.some(a=>a.includes('\0')))throw new Error('Invalid OpenSpec command');

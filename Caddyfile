@@ -1,0 +1,4 @@
+https://10.9.34.84:3443 {
+  tls internal
+  reverse_proxy api:3000
+}

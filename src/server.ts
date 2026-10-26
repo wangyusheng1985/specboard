@@ -1,4 +1,5 @@
-import { createApp } from './app.ts';
-const app=createApp({dataDir:process.env.DATA_DIR||'./data',secret:process.env.API_SECRET||'',encryptionKey:process.env.ENCRYPTION_KEY||'',workspaceRoot:process.env.WORKSPACE_ROOT||'./data/workspaces',sessionDir:process.env.SESSION_DIR||'./data/sessions',agentDir:process.env.PI_AGENT_DIR||'./data/pi',allowedHosts:(process.env.GITLAB_ALLOWED_HOSTS||'gitlab.com').split(',').map(s=>s.trim())});
-app.server.listen(Number(process.env.PORT||3000),'0.0.0.0',()=>console.log('Specboard listening'));
-for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{void app.close().then(()=>process.exit(0));});
+import {createRuntimeApi} from './runtime-api.ts';
+const required=(name:string)=>{const value=process.env[name];if(!value||value.length<16)throw new Error(`${name} is required`);return value;};
+const runtime=await createRuntimeApi({databaseUrl:required('DATABASE_URL'),secret:required('API_SECRET'),dispatcherToken:required('DISPATCHER_TOKEN'),gatewayUrl:process.env.GATEWAY_URL||'http://llm-gateway:4000',gatewayAdminToken:required('GATEWAY_ADMIN_TOKEN'),encryptionKey:required('ENCRYPTION_KEY')});
+await runtime.app.listen({port:Number(process.env.PORT||3000),host:'0.0.0.0'});
+for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>{void runtime.app.close().then(()=>process.exit(0));});

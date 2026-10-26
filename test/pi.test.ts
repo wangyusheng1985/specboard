@@ -21,7 +21,7 @@ test('real Pi SDK creates and restores stage sessions with packaged OpenSpec ski
    const conversation=s.db.prepare('SELECT * FROM conversations WHERE task_id=? AND stage=?').get(task.id,stage)!;
    assert.equal(conversation.cwd,dir);assert.match(conversation.skill_version as string,/^[a-f0-9]{64}$/);assert.ok(conversation.session_path);
   }
-  assert.equal(s.db.prepare('SELECT count(*) AS n FROM conversations').get()!.n,4);
+  assert.equal(s.db.prepare('SELECT count(*) AS n FROM conversations').get()!.n,stages.length);
  }finally{
   for(const [name,value] of [['PI_PROVIDER',old.provider],['PI_MODEL',old.model],['PI_API_KEY',old.key]]){if(value===undefined)delete process.env[name!];else process.env[name!]=value;}
   s.close();await rm(dir,{recursive:true,force:true});

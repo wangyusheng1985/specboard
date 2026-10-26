@@ -1,0 +1,1 @@
+declare module '../public/detail-refresh-state.js' { export class DetailRefreshState { begin(taskId:string,root:any):number; current(sequence:number,taskId:string,open?:boolean):boolean; close():void; capture(root:any):void; restore(root:any):void; markDirty(input:any):void; clearDirty(key:string,root:any):void; } }

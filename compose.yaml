@@ -1,35 +1,108 @@
 services:
-  specboard:
-    image: specboard:local
-    build: .
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: specboard
+      POSTGRES_USER: specboard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U specboard -d specboard"]
+      interval: 5s
+      retries: 10
+    networks: [database]
+  api:
+    image: ${SPECBOARD_API_IMAGE:-ghcr.io/wangyusheng1985/specboard-api:latest}
     init: true
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:${PORT:-3000}:3000"
+    depends_on:
+      db: {condition: service_healthy}
+    ports: ["${BIND_ADDRESS:-127.0.0.1}:${PORT:-3000}:3000"]
     environment:
       PORT: 3000
-      DATA_DIR: /data
-      SESSION_DIR: /sessions
-      WORKSPACE_ROOT: /workspaces
-      API_SECRET: ${API_SECRET:?Set API_SECRET in .env}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
-      GITLAB_ALLOWED_HOSTS: ${GITLAB_ALLOWED_HOSTS:-gitlab.com}
-      PI_PROVIDER: ${PI_PROVIDER:-}
-      PI_MODEL: ${PI_MODEL:-}
-      PI_API_KEY: ${PI_API_KEY:-}
-      PI_AGENT_DIR: /data/pi
-      REQUEST_WINDOW_MS: ${REQUEST_WINDOW_MS:-60000}
-      COOKIE_SECURE: ${COOKIE_SECURE:-false}
-    volumes:
-      - data:/data
-      - sessions:/sessions
-      - workspaces:/workspaces
+      DATABASE_URL: postgres://specboard:${POSTGRES_PASSWORD}@db:5432/specboard
+      RECOVERY_ENABLED: ${RECOVERY_ENABLED:-true}
+      CLARIFICATIONS_ENABLED: ${CLARIFICATIONS_ENABLED:-true}
+      API_SECRET: ${API_SECRET:?Set API_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY}
+      DISPATCHER_TOKEN: ${DISPATCHER_TOKEN:?Set DISPATCHER_TOKEN}
+      GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:?Set GATEWAY_ADMIN_TOKEN}
+      GATEWAY_URL: http://llm-gateway:4000
+      GIT_ALLOWED_HOSTS: ${GIT_ALLOWED_HOSTS:-gitlab.com,github.com}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
+      interval: 5s
+      retries: 10
+    networks: [database, internal, egress]
+  https-proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      api: {condition: service_healthy}
+    ports:
+      - "${HTTPS_BIND_ADDRESS:-0.0.0.0}:${HTTPS_PORT:-3443}:3443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    networks: [internal]
+  volume-init:
+    image: ${SPECBOARD_API_IMAGE:-ghcr.io/wangyusheng1985/specboard-api:latest}
+    user: root
+    command: ["sh", "-c", "chown 1000:1000 /workspaces /sessions"]
+    volumes:
+      - workspaces:/workspaces
+      - sessions:/sessions
+    restart: "no"
+  dispatcher:
+    image: ${SPECBOARD_API_IMAGE:-ghcr.io/wangyusheng1985/specboard-api:latest}
+    command: ["node", "--import", "tsx", "src/dispatcher.ts"]
+    user: root
+    restart: unless-stopped
+    depends_on:
+      api: {condition: service_healthy}
+      volume-init: {condition: service_completed_successfully}
+    environment:
+      DISPATCHER_SERVER: "true"
+      API_URL: http://api:3000
+      DISPATCHER_TOKEN: ${DISPATCHER_TOKEN}
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Set GATEWAY_TOKEN}
+      AGENT_IMAGE: ${SPECBOARD_AGENT_IMAGE:-ghcr.io/wangyusheng1985/specboard-agent:latest}
+      AGENT_NETWORK: specboard_internal
+      WORKSPACE_VOLUME: specboard_workspaces
+      SESSION_VOLUME: specboard_sessions
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [internal]
+  llm-gateway:
+    image: ${SPECBOARD_GATEWAY_IMAGE:-ghcr.io/wangyusheng1985/specboard-gateway:latest}
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      GATEWAY_SERVER: "true"
+      DATABASE_URL: postgres://specboard:${POSTGRES_PASSWORD}@db:5432/specboard
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN}
+      GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      GATEWAY_ALLOWED_HOSTS: ${GATEWAY_ALLOWED_HOSTS:-}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      retries: 10
+    networks: [database, internal, egress]
 volumes:
-  data:
-  sessions:
+  postgres-data:
   workspaces:
+    name: specboard_workspaces
+  sessions:
+    name: specboard_sessions
+  certs:
+    name: specboard_https_certs
+networks:
+  database:
+    internal: true
+  internal:
+    name: specboard_internal
+  egress:

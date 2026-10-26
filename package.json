@@ -7,18 +7,35 @@
     "node": ">=24"
   },
   "scripts": {
+    "lint": "eslint src test",
     "test": "tsx --test test/*.test.ts",
+    "coverage": "c8 --all --include 'src/agent-container.ts' --check-coverage --lines 90 --functions 90 --reporter=text --reporter=lcov --reporter=cobertura tsx --test test/*.test.ts",
     "start": "tsx src/server.ts",
-    "check": "tsc"
+    "dispatcher": "tsx src/dispatcher.ts",
+    "check": "tsc",
+    "build": "tsc --outDir dist --declaration false --sourceMap false"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^1.3.0",
+    "@fastify/static": "^10.1.6",
+    "@fastify/swagger": "^9.9.2",
+    "@fastify/swagger-ui": "^6.1.2",
     "@fission-ai/openspec": "^1.14.3",
+    "@gitbeaker/rest": "^43.8.0",
+    "@octokit/rest": "^22.0.1",
+    "dockerode": "^5.0.1",
+    "fastify": "^5.12.7",
+    "pg": "^8.23.1",
     "tsx": "^4.23.15",
     "typebox": "^1.4.2"
   },
   "devDependencies": {
+    "@types/dockerode": "^4.0.2",
     "@types/node": "^26.6.5",
-    "typescript": "^7.0.2"
+    "@types/pg": "^8.23.1",
+    "c8": "^10.1.3",
+    "eslint": "^9.39.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2"
   }
 }

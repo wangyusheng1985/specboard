@@ -1,0 +1,13 @@
+import {randomUUID} from 'node:crypto';
+import type pg from 'pg';
+import {ApiError,inTransaction} from './runtime-security.ts';
+import {defaultExecutionBudget,recoveryDelay,type ExecutionBudget} from './outcomes.ts';
+export class EpisodeService{
+ constructor(public pool:pg.Pool,public clock:()=>number=Date.now){}
+ async create(db:pg.PoolClient,taskId:string,stage:string,budget=defaultExecutionBudget){const id=randomUUID();await db.query('INSERT INTO execution_episodes(id,task_id,stage,max_rounds,max_active_ms,status,created_at) VALUES($1,$2,$3,$4,$5,\'active\',$6)',[id,taskId,stage,budget.maxRounds,budget.maxActiveMs,this.clock()]);return id;}
+ async locked(db:pg.PoolClient,id:string){const row=(await db.query('SELECT * FROM execution_episodes WHERE id=$1 FOR UPDATE',[id])).rows[0];if(!row)throw new ApiError(404,'episode_missing','Execution episode not found');return row;}
+ async settle(db:pg.PoolClient,id:string,chargeable:boolean){const row=await this.locked(db,id),now=this.clock();const elapsed=row.charge_started_at===null?0:Math.max(0,now-Number(row.charge_started_at));const used=Number(row.used_active_ms)+elapsed;await db.query('UPDATE execution_episodes SET used_active_ms=$2,charge_started_at=$3 WHERE id=$1',[id,used,chargeable?now:null]);return {...row,used_active_ms:used,charge_started_at:chargeable?now:null};}
+ async chargeRound(db:pg.PoolClient,id:string,retryAfterMs=0){const row=await this.settle(db,id,false);if(row.status!=='active')throw new ApiError(409,'episode_inactive','Episode is not active');if(Number(row.used_rounds)>=row.max_rounds||Number(row.used_active_ms)>=Number(row.max_active_ms))throw new ApiError(409,'budget_exhausted','Automatic recovery budget exhausted');const round=row.used_rounds+1,delay=recoveryDelay(round,retryAfterMs);if(delay>=Number(row.max_active_ms)-Number(row.used_active_ms))throw new ApiError(409,'budget_exhausted','Insufficient recovery time');await db.query('UPDATE execution_episodes SET used_rounds=$2,charge_started_at=$3 WHERE id=$1',[id,round,this.clock()]);return {attempt:round,dueAt:this.clock()+delay,revocationVersion:row.revocation_version};}
+ async pause(id:string){return inTransaction(this.pool,async db=>{await this.settle(db,id,false);await db.query("UPDATE execution_episodes SET status='paused',revocation_version=revocation_version+1 WHERE id=$1",[id]);await db.query("UPDATE recovery_decisions SET status='cancelled' WHERE episode_id=$1 AND status IN ('pending','ready')",[id]);});}
+ budget(row:any):ExecutionBudget{return {maxRounds:row.max_rounds,maxActiveMs:Number(row.max_active_ms),usedRounds:row.used_rounds,usedActiveMs:Number(row.used_active_ms)};}
+}

@@ -1,0 +1,24 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import pg from 'pg';
+import {createRuntimeApi} from '../src/runtime-api.ts';
+import {createDiagnostic} from '../src/diagnostics.ts';
+test('diagnostic recovery is authenticated, versioned, idempotent and preserves intent',{skip:!process.env.TEST_DATABASE_URL},async()=>{
+ const admin=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL}),schema='diag_'+randomUUID().replaceAll('-','');await admin.query(`CREATE SCHEMA ${schema}`);const url=new URL(process.env.TEST_DATABASE_URL!);url.searchParams.set('options',`-c search_path=${schema}`);const runtime=await createRuntimeApi({databaseUrl:url.toString(),secret:'api',dispatcherToken:'dispatch',gatewayUrl:'http://gateway',gatewayAdminToken:'admin',encryptionKey:'key'});await runtime.app.ready();const {app,pool,service}=runtime;
+ try{const project=randomUUID();await pool.query('INSERT INTO projects VALUES($1,$2,$3,$4,$5,$6)',[project,'test','https://example.test/repo','encrypted','main','/workspaces']);const auth={authorization:'Bearer api'};const task=(await app.inject({method:'POST',url:'/api/v1/tasks',headers:{...auth,'idempotency-key':randomUUID()},payload:{projectId:project,description:'Plan'}})).json();const run=(await service.claim('test')).items[0];const agent={authorization:'Bearer '+run.token,'x-run-generation':String(run.generation)};
+ await app.inject({method:'POST',url:`/internal/v1/runs/${run.id}/session`,headers:agent,payload:{path:'/sessions/test',skillVersion:'test'}});
+ const diagnostic=createDiagnostic({step:'validation',category:'artifact_validation',message:'tasks.md missing',safeBoundary:true});const complete=await app.inject({method:'POST',url:`/internal/v1/runs/${run.id}/complete`,headers:agent,payload:{status:'failed',error:diagnostic.message,diagnostic}});assert.equal(complete.statusCode,200,complete.body);
+ assert.equal((await app.inject({url:`/api/v1/tasks/${task.id}`,headers:auth})).json().failure_category,'artifact_validation');
+assert.equal((await app.inject({method:'POST',url:`/api/v1/tasks/${task.id}/commands`,headers:{...auth,'idempotency-key':randomUUID()},payload:{type:'transition',payload:{target:'Propose',version:0}}})).statusCode,409);
+ const rows=(await app.inject({url:`/api/v1/tasks/${task.id}/diagnostics`,headers:auth})).json().items;const body={diagnosticId:rows[0].id,taskVersion:0,action:'complete_artifacts',additionalContext:'Retain proposal'};
+ const recover=(payload:any,key=randomUUID(),headers:any=auth)=>app.inject({method:'POST',url:`/api/v1/tasks/${task.id}/recovery`,headers:{...headers,'idempotency-key':key},payload});assert.equal((await recover(body,randomUUID(),{})).statusCode,401);assert.equal((await recover({...body,taskVersion:1})).statusCode,409);
+ const oldFlag=process.env.RECOVERY_ENABLED;process.env.RECOVERY_ENABLED='false';try{assert.equal((await recover(body)).statusCode,409);}finally{if(oldFlag===undefined)delete process.env.RECOVERY_ENABLED;else process.env.RECOVERY_ENABLED=oldFlag;}
+ const beforeRuns=(await pool.query('SELECT count(*) FROM agent_runs WHERE task_id=$1',[task.id])).rows[0].count;const staleRetry=await recover({...body,taskVersion:999});assert.equal(staleRetry.statusCode,409);assert.equal((await pool.query('SELECT count(*) FROM agent_runs WHERE task_id=$1',[task.id])).rows[0].count,beforeRuns);
+ const key=randomUUID();const [a,b]=await Promise.all([recover(body,key),recover(body,key)]);assert.equal(a.statusCode,202,a.body);assert.equal(b.statusCode,202,b.body);assert.equal(a.json().id,b.json().id);assert.equal((await recover(body)).statusCode,409);
+ const next=(await service.claim('next')).items[0],nextAuth={authorization:'Bearer '+next.token,'x-run-generation':String(next.generation)};const context=(await app.inject({url:`/internal/v1/runs/${next.id}/context`,headers:nextAuth})).json();assert.equal(context.recovery.intent.additionalContext,'Retain proposal');assert.equal(context.session.path,'/sessions/test');assert.equal(context.task.stage,'Explore');
+ await app.inject({method:'POST',url:`/internal/v1/runs/${next.id}/complete`,headers:nextAuth,payload:{status:'completed',summary:'done'}});assert.equal((await pool.query('SELECT resolved_by FROM run_diagnostics WHERE id=$1',[rows[0].id])).rows[0].resolved_by,next.id);
+ const {migrateRuntime}=await import('../src/runtime-migration.ts');await migrateRuntime(pool);assert.equal((await pool.query('SELECT count(*) FROM run_diagnostics')).rows[0].count,'1');
+ const client=await pool.connect();try{await client.query('BEGIN');await client.query('DELETE FROM run_recoveries');await client.query('ROLLBACK');}finally{client.release();}assert.equal((await pool.query('SELECT count(*) FROM run_recoveries')).rows[0].count,'1');
+ }finally{await app.close();await admin.query(`DROP SCHEMA ${schema} CASCADE`);await admin.end();}
+});

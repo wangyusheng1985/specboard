@@ -1,0 +1,23 @@
+export const notificationTypes:Record<string,string>;
+export function capability(env?:any):boolean;
+export function permission(env?:any):string;
+export function preference(storage?:any):string;
+export function setPreference(value:string,storage?:any):void;
+export function requestPermission(env?:any,storage?:any):Promise<string>;
+export function consumeKey(key:string,storage?:any,channel?:any):boolean;
+export function notificationTarget(search:string):{task:string;stage:string|null}|null;
+export function notificationKey(task:any,type:string):string;
+export function createNotificationAdapter(env?:any,storage?:any,channel?:any):{
+ capability():boolean;
+ permission():string;
+ enabled():boolean;
+ preference():string;
+ request():Promise<string>;
+ disable():void;
+ consume(key:string):boolean;
+ notify(title:string,options:any):any;
+ notifyTest(origin?:string):any;
+};
+export function createTaskObserver(adapter:any,origin?:string):{reset():void;observe(tasks:any[]):void};
+export function notificationFor(previous:any,current:any):string|null;
+export function notificationPayload(task:any,type:string,origin?:string):any;

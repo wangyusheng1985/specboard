@@ -1,0 +1,69 @@
+stages:
+  - lint
+  - build
+  - test
+  - coverage
+  - release
+
+image: node:24-bookworm
+
+cache:
+  key:
+    files: [package-lock.json]
+  paths: [node_modules/]
+
+install:
+  stage: .pre
+  script: npm ci
+  artifacts:
+    paths: [node_modules/]
+    expire_in: 1 hour
+
+lint:
+  stage: lint
+  needs: [install]
+  script: npm run lint
+
+build:
+  stage: build
+  needs: [install]
+  script: npm run build
+  artifacts:
+    paths: [dist/]
+    expire_in: 1 week
+
+test:
+  stage: test
+  needs: [install]
+  script: npm test
+
+coverage:
+  stage: coverage
+  needs: [install]
+  script: npm run coverage
+  artifacts:
+    when: always
+    paths: [coverage/]
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+  coverage: '/All files[^|]*\|[^|]*\s+([0-9.]+)%/'
+
+release:multiarch:
+  stage: release
+  image: docker:27-cli
+  services:
+    - name: docker:27-dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  rules:
+    - if: '$CI_COMMIT_TAG'
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+    - docker buildx create --use --name specboard-builder
+  script:
+    - docker buildx build --platform linux/amd64,linux/arm64 --tag "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_TAG" --tag "$CI_REGISTRY_IMAGE/api:latest" --push .
+    - docker buildx build --platform linux/amd64,linux/arm64 --file Dockerfile.gateway --tag "$CI_REGISTRY_IMAGE/gateway:$CI_COMMIT_TAG" --tag "$CI_REGISTRY_IMAGE/gateway:latest" --push .

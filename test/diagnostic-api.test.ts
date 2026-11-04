@@ -12,6 +12,10 @@ test('diagnostic recovery is authenticated, versioned, idempotent and preserves 
  assert.equal((await app.inject({url:`/api/v1/tasks/${task.id}`,headers:auth})).json().failure_category,'artifact_validation');
 assert.equal((await app.inject({method:'POST',url:`/api/v1/tasks/${task.id}/commands`,headers:{...auth,'idempotency-key':randomUUID()},payload:{type:'transition',payload:{target:'Propose',version:0}}})).statusCode,409);
  const rows=(await app.inject({url:`/api/v1/tasks/${task.id}/diagnostics`,headers:auth})).json().items;const body={diagnosticId:rows[0].id,taskVersion:0,action:'complete_artifacts',additionalContext:'Retain proposal'};
+ assert.ok(rows[0].diagnostic.structured, 'diagnostic has structured section');
+ assert.ok(typeof rows[0].diagnostic.structured.analysis === 'string');
+ assert.ok(Array.isArray(rows[0].diagnostic.structured.suggestions) && rows[0].diagnostic.structured.suggestions.length >= 1);
+ assert.ok(typeof rows[0].diagnostic.structured.rawTrace === 'string');
  const recover=(payload:any,key=randomUUID(),headers:any=auth)=>app.inject({method:'POST',url:`/api/v1/tasks/${task.id}/recovery`,headers:{...headers,'idempotency-key':key},payload});assert.equal((await recover(body,randomUUID(),{})).statusCode,401);assert.equal((await recover({...body,taskVersion:1})).statusCode,409);
  const oldFlag=process.env.RECOVERY_ENABLED;process.env.RECOVERY_ENABLED='false';try{assert.equal((await recover(body)).statusCode,409);}finally{if(oldFlag===undefined)delete process.env.RECOVERY_ENABLED;else process.env.RECOVERY_ENABLED=oldFlag;}
  const beforeRuns=(await pool.query('SELECT count(*) FROM agent_runs WHERE task_id=$1',[task.id])).rows[0].count;const staleRetry=await recover({...body,taskVersion:999});assert.equal(staleRetry.statusCode,409);assert.equal((await pool.query('SELECT count(*) FROM agent_runs WHERE task_id=$1',[task.id])).rows[0].count,beforeRuns);

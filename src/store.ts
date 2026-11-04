@@ -5,7 +5,7 @@ export const stages = ['Explore', 'Propose', 'Apply', 'MR', 'Archive'] as const;
 export type Stage = typeof stages[number];
 export type RunStatus = 'queued' | 'running' | 'waiting_input' | 'paused' | 'failed' | 'completed' | 'stopped' | 'interrupted';
 export interface Project { id: string; name: string; repositoryUrl: string; encryptedToken: string; defaultBranch: string; workspaceRoot: string; deletedAt?: number | null }
-export interface Task { id: string; projectId: string; description: string; stage: Stage; status: RunStatus; version: number; stageEnteredAt: number }
+export interface Task { id: string; projectId?: string | null; description: string; stage: Stage; status: RunStatus; version: number; stageEnteredAt: number; kind?: 'work' | 'chat'; deletedAt?: number | null }
 
 export class Store {
   db: DatabaseSync;
@@ -13,7 +13,7 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, repository_url TEXT NOT NULL, encrypted_token TEXT NOT NULL, default_branch TEXT NOT NULL, workspace_root TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), description TEXT NOT NULL, stage TEXT NOT NULL CHECK(stage IN ('Explore','Propose','Apply','MR','Archive')), status TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0, stage_entered_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id), description TEXT NOT NULL, stage TEXT NOT NULL CHECK(stage IN ('Explore','Propose','Apply','MR','Archive')), status TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0, stage_entered_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS lane_order ON tasks(stage,stage_entered_at,id);
       CREATE TABLE IF NOT EXISTS stage_runs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), stage TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER, ended_at INTEGER, step TEXT, result TEXT, error TEXT);
       CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), stage TEXT NOT NULL, session_path TEXT, cwd TEXT NOT NULL, skill_version TEXT NOT NULL, UNIQUE(task_id,stage));
@@ -32,6 +32,8 @@ export class Store {
     const columns=this.db.prepare('PRAGMA table_info(tasks)').all().map(row=>row.name);
     if(!columns.includes('updated_at'))this.db.exec('ALTER TABLE tasks ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0');
     if(!columns.includes('summary'))this.db.exec("ALTER TABLE tasks ADD COLUMN summary TEXT NOT NULL DEFAULT ''");
+    if(!columns.includes('kind'))this.db.exec("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'work'");
+    if(!columns.includes('deleted_at'))this.db.exec("ALTER TABLE tasks ADD COLUMN deleted_at INTEGER");
   }
   transaction<T>(fn: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -39,14 +41,14 @@ export class Store {
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   task(id: string): Task {
-    const row = this.db.prepare('SELECT id, project_id AS projectId, description, stage, status, version, stage_entered_at AS stageEnteredAt FROM tasks WHERE id=?').get(id);
+    const row = this.db.prepare('SELECT id, project_id AS projectId, description, stage, status, version, stage_entered_at AS stageEnteredAt, kind, deleted_at AS deletedAt FROM tasks WHERE id=?').get(id);
     if (!row) throw new Error('Task not found');
     return row as unknown as Task;
   }
-  createTask(projectId: string, description: string): Task {
+  createTask(projectId: string | null, description: string, kind: 'work' | 'chat' = 'work'): Task {
     if (typeof description!=='string' || !description.trim() || description.length>20000) throw new Error('Description is required');
     const id = randomUUID();
-    this.db.prepare("INSERT INTO tasks(id,project_id,description,stage,status,version,stage_entered_at,updated_at) VALUES(?,?,?,'Explore','queued',0,?,?)").run(id, projectId, description, Date.now(),Date.now());
+    this.db.prepare("INSERT INTO tasks(id,project_id,description,stage,status,version,stage_entered_at,updated_at,kind) VALUES(?,?,?,'Explore','queued',0,?,?,?)").run(id, projectId, description, Date.now(),Date.now(),kind);
     return this.task(id);
   }
   private secrets: string[] = [];
@@ -100,6 +102,16 @@ export class Store {
   completeCommand(id: string, result: unknown) {
     const updated = this.db.prepare("UPDATE commands SET status='completed',result=? WHERE id=? AND status!='completed'").run(JSON.stringify(result), id);
     if (!updated.changes) throw new Error('Command missing or already completed');
+  }
+  deleteTask(id: string) {
+    return this.transaction(() => {
+      const task = this.task(id);
+      const now = Date.now();
+      this.db.prepare("UPDATE agent_runs SET status='stopped' WHERE task_id=? AND status IN ('queued','claimed','running','waiting_input','awaiting_answers')").run(id);
+      this.db.prepare("UPDATE tasks SET deleted_at=?,status='stopped',updated_at=? WHERE id=?").run(now, now, id);
+      this.event(id, task.stage, 'task_deleted', { deletedAt: now });
+      return { id, deleted: true, deletedAt: now };
+    });
   }
   close() { this.db.close(); }
 }

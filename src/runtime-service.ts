@@ -1,4 +1,5 @@
-import {createDiagnostic,validateDiagnostic} from './diagnostics.ts';
+import {createDiagnostic,validateDiagnostic,type Diagnostic} from './diagnostics.ts';
+import {synthesizeStructuredDiagnostic} from './diagnostic-synthesizer.ts';
 import {randomUUID} from 'node:crypto';
 import type pg from 'pg';
 import {ApiError,mintToken,inTransaction,digest} from './runtime-security.ts';
@@ -6,7 +7,7 @@ import {stages} from './store.ts';
 import {AutomaticRecoveryService} from './automatic-recovery.ts';
 import {projectOutcome} from './outcomes.ts';
 export class RuntimeService{
- constructor(public pool:pg.Pool){this.recovery=new AutomaticRecoveryService(pool);}
+ constructor(public pool:pg.Pool,public options:{gatewayUrl?:string}={}){this.recovery=new AutomaticRecoveryService(pool);}
  private recovery:AutomaticRecoveryService;
  async task(id:string,db:pg.Pool|pg.PoolClient=this.pool){const row=(await db.query("SELECT t.*,(SELECT diagnostic->>'category' FROM run_diagnostics d WHERE d.task_id=t.id AND d.stage=t.stage ORDER BY d.created_at DESC LIMIT 1) AS failure_category FROM tasks t WHERE t.id=$1 AND t.deleted_at IS NULL",[id])).rows[0];if(!row)throw new ApiError(404,'task_not_found','Task not found');row.outcome_state=projectOutcome(row);return row;}
  async event(db:pg.Pool|pg.PoolClient,taskId:string,runId:string|null,type:string,payload:unknown){await db.query('INSERT INTO runtime_events(task_id,run_id,type,payload,created_at) VALUES($1,$2,$3,$4,$5)',[taskId,runId,type,JSON.stringify(payload),Date.now()]);}
@@ -21,17 +22,25 @@ export class RuntimeService{
   if(text)await db.query("INSERT INTO run_commands(id,run_id,type,payload,status,created_at) VALUES($1,$2,'message',$3,'queued',$4)",[randomUUID(),id,JSON.stringify({text}),now]);
   await db.query("UPDATE tasks SET status='queued',wait_reason=NULL,outcome_state='executing',outcome_revision=outcome_revision+1,updated_at=$2 WHERE id=$1",[task.id,now]);return {id,generation};
  }
- async create(db:pg.PoolClient,projectId:string,description:string){
-  const project=(await db.query('SELECT id FROM projects WHERE id=$1',[projectId])).rows[0];if(!project)throw new ApiError(404,'project_not_found','Project not found');
-  const id=randomUUID(),now=Date.now();await db.query("INSERT INTO tasks(id,project_id,description,stage,status,version,stage_entered_at,updated_at,execution_policy,outcome_state) VALUES($1,$2,$3,'Explore','queued',0,$4,$4,'autonomous','clarifying')",[id,projectId,description,now]);const task=await this.task(id,db);await this.enqueue(db,task);return task;
+ async create(db:pg.PoolClient,projectId:string|null,description:string,kind:'work'|'chat'='work'){
+  if(projectId){
+   const project=(await db.query('SELECT id FROM projects WHERE id=$1',[projectId])).rows[0];if(!project)throw new ApiError(404,'project_not_found','Project not found');
+  }else if(kind!=='chat'){
+   throw new ApiError(400,'project_required','Project is required for work tasks');
+  }
+  const id=randomUUID(),now=Date.now();
+  await db.query("INSERT INTO tasks(id,project_id,description,stage,status,version,stage_entered_at,updated_at,execution_policy,outcome_state,kind) VALUES($1,$2,$3,'Explore','queued',0,$4,$4,'autonomous','clarifying',$5)",[id,projectId||null,description,now,kind]);
+  const task=await this.task(id,db);
+  await this.enqueue(db,task);
+  return task;
  }
  async claim(owner:string){return inTransaction(this.pool,async db=>{
   const recovery=(await db.query("SELECT d.*,e.task_id,e.stage,e.revocation_version AS current_revocation FROM recovery_decisions d JOIN execution_episodes e ON e.id=d.episode_id JOIN agent_runs r ON r.id=d.origin_run WHERE d.status='pending' AND d.due_at<=$1 AND e.status='active' AND d.session_ready_at IS NOT NULL AND d.container_exited_at IS NOT NULL AND d.revocation_version=e.revocation_version AND r.status IN ('failed','interrupted')  FOR UPDATE OF d,e SKIP LOCKED LIMIT 1",[Date.now()])).rows[0];
-  if(recovery){const task=await this.task(recovery.task_id,db);const queued=await this.enqueue(db,task);const token=await mintToken(db,'agent',86400000,queued.id,queued.generation);await db.query("UPDATE agent_runs SET status='claimed',agent_token_id=$2,lease_expires_at=$3,updated_at=$4 WHERE id=$1",[queued.id,token.id,Date.now()+60000,Date.now()]);await db.query("UPDATE recovery_decisions SET status='claimed',successor_run=$2 WHERE id=$1",[recovery.id,queued.id]);const diagnostic=(await db.query('SELECT id FROM run_diagnostics WHERE run_id=$1',[recovery.origin_run])).rows[0];if(diagnostic)await db.query('INSERT INTO run_recoveries(run_id,diagnostic_id,intent) VALUES($1,$2,$3) ON CONFLICT(run_id) DO NOTHING',[queued.id,diagnostic.id,JSON.stringify({strategy:recovery.strategy,attempt:recovery.attempt_no})]);await this.event(db,task.id,queued.id,'recovery_claimed',{owner,generation:queued.generation,attempt:recovery.attempt_no});return {items:[{id:queued.id,generation:queued.generation,taskId:task.id,projectId:task.project_id,token:token.token}]};}
+  if(recovery){const task=await this.task(recovery.task_id,db);const queued=await this.enqueue(db,task);const token=await mintToken(db,'agent',86400000,queued.id,queued.generation);await db.query("UPDATE agent_runs SET status='claimed',agent_token_id=$2,lease_expires_at=$3,updated_at=$4 WHERE id=$1",[queued.id,token.id,Date.now()+60000,Date.now()]);await db.query("UPDATE recovery_decisions SET status='claimed',successor_run=$2 WHERE id=$1",[recovery.id,queued.id]);const diagnostic=(await db.query('SELECT id FROM run_diagnostics WHERE run_id=$1',[recovery.origin_run])).rows[0];if(diagnostic)await db.query('INSERT INTO run_recoveries(run_id,diagnostic_id,intent) VALUES($1,$2,$3) ON CONFLICT(run_id) DO NOTHING',[queued.id,diagnostic.id,JSON.stringify({strategy:recovery.strategy,attempt:recovery.attempt_no})]);await this.event(db,task.id,queued.id,'recovery_claimed',{owner,generation:queued.generation,attempt:recovery.attempt_no});return {items:[{id:queued.id,generation:queued.generation,taskId:task.id,projectId:task.project_id||'',token:token.token}]};}
   const run=(await db.query("SELECT * FROM agent_runs WHERE status='queued' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1")).rows[0];if(!run)return {items:[]};
   const token=await mintToken(db,'agent',86400000,run.id,run.generation);
   await db.query("UPDATE agent_runs SET status='claimed',agent_token_id=$2,lease_expires_at=$3,updated_at=$4 WHERE id=$1",[run.id,token.id,Date.now()+60000,Date.now()]);
-  await this.event(db,run.task_id,run.id,'dispatch_claimed',{owner,generation:run.generation});return {items:[{id:run.id,generation:run.generation,taskId:run.task_id,projectId:(await this.task(run.task_id,db)).project_id,token:token.token}]};
+  await this.event(db,run.task_id,run.id,'dispatch_claimed',{owner,generation:run.generation});return {items:[{id:run.id,generation:run.generation,taskId:run.task_id,projectId:(await this.task(run.task_id,db)).project_id||'',token:token.token}]};
  });}
  async active(id:string,generation:number,db:pg.Pool|pg.PoolClient=this.pool){
   const row=(await db.query('SELECT * FROM agent_runs WHERE id=$1',[id])).rows[0];
@@ -57,7 +66,26 @@ export class RuntimeService{
   await db.query('INSERT INTO runtime_results(run_id,status,summary,validation,artifacts,blockers,error) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,result.status,result.summary||'',JSON.stringify(result.validation||[]),JSON.stringify(result.artifacts||[]),JSON.stringify(result.blockers||[]),result.error||null]);
   await db.query('UPDATE agent_runs SET status=$2,updated_at=$3 WHERE id=$1',[id,result.status,Date.now()]);
   let recoveryAction:string|undefined;
-  if(result.status==='failed'||result.status==='interrupted'){const diagnostic=result.diagnostic?validateDiagnostic(result.diagnostic):createDiagnostic({step:'dispatch',message:result.error||'Execution failed; detailed evidence unavailable',category:result.status==='interrupted'?'interrupted':'unknown'});await db.query('INSERT INTO run_diagnostics(id,run_id,task_id,stage,generation,diagnostic,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(run_id) DO NOTHING',[diagnostic.id,id,run.task_id,run.stage,generation,JSON.stringify(diagnostic),Date.now()]);recoveryAction=(await this.recovery.decideIn(db,id,{category:diagnostic.category,safeBoundary:diagnostic.recoverySafety==='safe_boundary',sessionReady:true,containerExited:true,workspaceReleased:true,unconfirmedTool:false})).action;}
+  if(result.status==='failed'||result.status==='interrupted'){
+    let diagnostic:Diagnostic=result.diagnostic?validateDiagnostic(result.diagnostic):createDiagnostic({step:'dispatch',message:result.error||'Execution failed; detailed evidence unavailable',category:result.status==='interrupted'?'interrupted':'unknown'});
+    if(!diagnostic.structured){
+      try{
+        const structured=await synthesizeStructuredDiagnostic({
+          message:diagnostic.message,
+          details:diagnostic.details,
+          stage:run.stage,
+          category:diagnostic.category,
+          code:diagnostic.code,
+          gatewayUrl:this.options.gatewayUrl
+        });
+        diagnostic={...diagnostic,structured};
+      }catch{
+        /* synthesis fallback already handled inside synthesizeStructuredDiagnostic */
+      }
+    }
+    await db.query('INSERT INTO run_diagnostics(id,run_id,task_id,stage,generation,diagnostic,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(run_id) DO NOTHING',[diagnostic.id,id,run.task_id,run.stage,generation,JSON.stringify(diagnostic),Date.now()]);
+    recoveryAction=(await this.recovery.decideIn(db,id,{category:diagnostic.category,safeBoundary:diagnostic.recoverySafety==='safe_boundary',sessionReady:true,containerExited:true,workspaceReleased:true,unconfirmedTool:false})).action;
+  }
 
   if(result.status==='completed')await db.query('UPDATE run_diagnostics SET resolved_by=$1 WHERE id IN (SELECT diagnostic_id FROM run_recoveries WHERE run_id=$1)',[id]);
   const status=result.status==='completed'?(run.stage==='Archive'?'completed':'waiting_input'):result.status;const outcome=recoveryAction==='retry_request'||recoveryAction==='repair_artifacts'||recoveryAction==='repair_implementation'?'recovering':result.status==='completed'?(run.stage==='Apply'||run.stage==='MR'?'delivered':run.stage==='Archive'?'archived':run.stage==='Propose'?'awaiting_proposal_approval':'clarifying'):['failed','interrupted'].includes(result.status)?'blocked':result.status;
@@ -123,7 +151,7 @@ export class RuntimeService{
   if(paths?.workspaces||paths?.sessions){
    const {rm}=await import('node:fs/promises');
    const {join}=await import('node:path');
-   if(paths.workspaces){
+   if(paths.workspaces&&task.project_id){
     const worktreePath=join(paths.workspaces,task.project_id,'tasks',taskId);
     await rm(worktreePath,{recursive:true,force:true}).catch(()=>{});
    }

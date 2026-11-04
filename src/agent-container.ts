@@ -9,6 +9,9 @@ import {createRequire} from 'node:module';
 import {dirname,join} from 'node:path';
 import {verifyStage} from './stage-verification.ts';
 import {createHash} from 'node:crypto';
+import {getArchivePromptGuidance} from './archive-policy.ts';
+export {getArchivePromptGuidance};
+
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 const exec=promisify(execFile);
@@ -45,16 +48,22 @@ export async function runAgent(paths={workspaces:'/workspaces',sessions:'/sessio
  const pending:any[]=[];let sequence=0;const omissions:ArtifactOmission[]=[];let step:DiagnosticStep='repository';
  const collect=async()=>{if(task.stage==='Propose')await call('artifact-report',await validatePlanningReport(cwd,task.id,await inspectPlanningArtifacts(cwd,task.id,[token,process.env.GATEWAY_TOKEN||'']),omissions));};
  try{
-  let locked=false;while(!locked){try{await call('workspace-lock',{});locked=true;}catch{await new Promise(resolve=>setTimeout(resolve,1000));}}
-  const credential=await call('repository-credential');
-  const gitAuthorName = project.git_user_name || 'Specboard Agent';
-  const gitAuthorEmail = project.git_user_email || 'agent@specboard.local';
-  const gitEnv={...env,GIT_AUTHOR_NAME:gitAuthorName,GIT_AUTHOR_EMAIL:gitAuthorEmail,GIT_COMMITTER_NAME:gitAuthorName,GIT_COMMITTER_EMAIL:gitAuthorEmail,GIT_CONFIG_COUNT:'2',GIT_CONFIG_KEY_0:'credential.helper',GIT_CONFIG_VALUE_0:'',GIT_CONFIG_KEY_1:'http.extraHeader',GIT_CONFIG_VALUE_1:`Authorization: Basic ${Buffer.from('oauth2:'+credential.token).toString('base64')}`};
-  const root=join(paths.workspaces,project.id),repository=join(root,'repository');await mkdir(root,{recursive:true});
-  const git=async(args:string[],path?:string)=>{try{return await exec('git',args,{cwd:path,env:gitEnv,timeout:120000});}catch{throw new Error('Repository operation failed');}};
-  if(!await stat(repository).catch(()=>null))await git(['clone','--no-checkout','--',project.repository_url,repository]);
-  if(!await stat(cwd).catch(()=>null)){await git(['fetch','origin',project.default_branch],repository);await mkdir(dirname(cwd),{recursive:true});await git(['worktree','add','-b',`specboard/${task.id}`,cwd,'FETCH_HEAD'],repository);}
-  const gitlabToken=credential.token;credential.token='';await call('workspace-lock',{release:true});
+  let gitlabToken='';
+  let gitEnv:Record<string,string|undefined>=env;
+  const git=async(args:string[],path?:string)=>{try{return await exec('git',args,{cwd:path,env:gitEnv,timeout:120000});}catch(err:any){throw new Error('Repository operation failed: '+(err?.stderr||err?.stdout||err?.message||'unknown'));}};
+  if(project){
+   let locked=false;while(!locked){try{await call('workspace-lock',{});locked=true;}catch{await new Promise(resolve=>setTimeout(resolve,1000));}}
+   const credential=await call('repository-credential');
+   const gitAuthorName = project.git_user_name || 'Specboard Agent';
+   const gitAuthorEmail = project.git_user_email || 'agent@specboard.local';
+   gitEnv={...env,GIT_AUTHOR_NAME:gitAuthorName,GIT_AUTHOR_EMAIL:gitAuthorEmail,GIT_COMMITTER_NAME:gitAuthorName,GIT_COMMITTER_EMAIL:gitAuthorEmail,GIT_CONFIG_COUNT:'2',GIT_CONFIG_KEY_0:'credential.helper',GIT_CONFIG_VALUE_0:'',GIT_CONFIG_KEY_1:'http.extraHeader',GIT_CONFIG_VALUE_1:`Authorization: Basic ${Buffer.from('oauth2:'+credential.token).toString('base64')}`};
+   const root=join(paths.workspaces,project.id),repository=join(root,'repository');await mkdir(root,{recursive:true});
+   if(!await stat(repository).catch(()=>null))await git(['clone','--no-checkout','--',project.repository_url,repository]);
+   if(!await stat(cwd).catch(()=>null)){await git(['fetch','origin',project.default_branch],repository);await mkdir(dirname(cwd),{recursive:true});await git(['worktree','add','-b',`specboard/${task.id}`,cwd,'FETCH_HEAD'],repository);}
+   gitlabToken=credential.token;credential.token='';await call('workspace-lock',{release:true});
+  }else{
+   await mkdir(cwd,{recursive:true});
+  }
   const require=createRequire(import.meta.url),rootPackage=dirname(dirname(require.resolve('@fission-ai/openspec')));
   const skills:Record<string,[string,string]>={Explore:['explore','getExploreSkillTemplate'],Propose:['propose','getOpsxProposeSkillTemplate'],Apply:['apply-change','getApplyChangeSkillTemplate'],MR:['apply-change','getApplyChangeSkillTemplate'],Archive:['archive-change','getArchiveChangeSkillTemplate']};
   const [file,method]=skills[task.stage],module=await import(join(rootPackage,'dist/core/templates/workflows',file+'.js')),skill=module[method]().instructions;
@@ -62,7 +71,7 @@ export async function runAgent(paths={workspaces:'/workspaces',sessions:'/sessio
   step='session';
   const agentDir=join(paths.sessions,task.id,'config');await mkdir(agentDir,{recursive:true});
   const runtime=await ModelRuntime.create({modelsPath:null,authPath:join(agentDir,'auth.json')});
-  runtime.registerProvider('gateway',{baseUrl:context.gatewayUrl+'/v1',api:'openai-responses',models:[{id:'agent-default',name:'Agent Gateway',reasoning:false,input:['text'],contextWindow:128000,maxTokens:16384,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]});
+  runtime.registerProvider('gateway',{baseUrl:context.gatewayUrl+'/v1',api:'openai-responses',models:[{id:'agent-default',name:'Agent Gateway',reasoning:true,input:['text'],contextWindow:128000,maxTokens:16384,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]});
   await runtime.setRuntimeApiKey('gateway',process.env.GATEWAY_TOKEN!);
   if(context.clarification&&(!context.session?.path||!await stat(context.session.path).catch(()=>null)))throw new Error('Clarification session is missing; manual recovery required');
   const manager=context.session?.path&&await stat(context.session.path).catch(()=>null)?SessionManager.open(context.session.path):SessionManager.create(cwd,join(paths.sessions,task.id,task.stage));
@@ -71,14 +80,72 @@ export async function runAgent(paths={workspaces:'/workspaces',sessions:'/sessio
    for(const message of entries){if(message.role==='assistant')for(const part of message.content||[])if(part.type==='toolCall')outstanding.add(part.id);if(message.role==='toolResult')outstanding.delete(message.toolCallId);}
    if(outstanding.size)throw new Error('Session contains unconfirmed tool operations; inspect workspace and session before recovery');
   }
-  const loader=new DefaultResourceLoader({cwd,agentDir,noExtensions:true,noSkills:true,noPromptTemplates:true,appendSystemPromptOverride:()=>[skill,`Execute only ${task.stage}. Change name task-${task.id}. Never advance stages or push remote changes automatically. The container includes python3, pip, venv, ruff and Go (go test, go vet, gofmt). Root filesystem is read-only; use the task worktree for virtual environments and generated files. Use /tmp for caches, with GOCACHE=/tmp/go-cache, GOMODCACHE=/tmp/go-mod and GOPATH=/tmp/go-path. Run ruff with --no-cache or set its cache under /tmp. Never install into system directories. Return results, validation and blockers. In Explore stage, you may generate demonstration or prototype files (such as high-fidelity interactive HTML prototypes, markdown summary documents, or architecture diagram files) directly in the workspace when requested or helpful. When user choices are needed call request_clarification with questions containing id, type (single_choice, multiple_choice, text, confirmation), prompt, reason, required, and options with id/label for choice types. Never assume a user answer.`]});await loader.reload();
+  let remoteTracksSpecs = false;
+  if(task.stage==='Archive'&&project){
+   try{
+    await git(['cat-file','-e',`origin/${project.default_branch}:openspec/specs`],cwd);
+    remoteTracksSpecs=true;
+   }catch{
+    remoteTracksSpecs=false;
+   }
+  }
+  const loader=new DefaultResourceLoader({cwd,agentDir,noExtensions:true,noSkills:true,noPromptTemplates:true,appendSystemPromptOverride:()=>[
+   skill,
+   `Execute only ${task.stage}. Change name task-${task.id}. Never advance stages or push remote changes automatically. The container includes python3, pip, venv, ruff and Go (go test, go vet, gofmt). Root filesystem is read-only; use the task worktree for virtual environments and generated files. Use /tmp for caches, with GOCACHE=/tmp/go-cache, GOMODCACHE=/tmp/go-mod and GOPATH=/tmp/go-path. Run ruff with --no-cache or set its cache under /tmp. Never install into system directories. Return results, validation and blockers. In Explore stage and Chat mode, when user explicitly requests generating or creating a prototype, demonstration, mockup, html file (such as demo_preview.html) or architecture diagram, you are ALREADY FULLY AUTHORIZED to generate and write that file immediately in the workspace using your write/edit tools. Do NOT ask the user for confirmation or permission again. Create the file directly and present your work. When substantive product decisions or user choices are needed call request_clarification with questions containing id, type (single_choice, multiple_choice, text, confirmation), prompt, reason, required, and options with id/label for choice types. Never assume a user answer. You have web_search and fetch_content tools available to look up current documentation and technical information from the web. When exploring code or answering questions, search or inspect project files first as ground truth when a project is bound; use web tools to supplement missing context or read external references.`,
+   ...(task.stage==='Archive'?[getArchivePromptGuidance(remoteTracksSpecs)]:[]),
+  ]});await loader.reload();
   const definitions=[createReadToolDefinition(cwd),createGrepToolDefinition(cwd),createFindToolDefinition(cwd),createLsToolDefinition(cwd),createEditToolDefinition(cwd),createWriteToolDefinition(cwd),...(task.stage==='Explore'?[]:[createBashToolDefinition(cwd,{spawnHook:ctx=>({...ctx,env:{...gitEnv,PATH:'/app/node_modules/.bin:'+env.PATH}})})])] as ToolDefinition[];
   const guarded=definitions.map(tool=>({...tool,execute:async(...args:Parameters<ToolDefinition['execute']>)=>{if(questionBatch)throw new Error('Waiting for user answers');return tool.execute(...args);}}));
   const clarificationTool:ToolDefinition={name:'request_clarification',label:'Ask user',description:'Ask the user a batch of questions and suspend this stage. Use before making decisions that require user input.',parameters:Type.Object({questions:Type.Array(Type.Any(),{minItems:1,maxItems:20})}),execute:async(_toolId,params,_signal,_update,ctx)=>{if(questionBatch)throw new Error('Questions already pending');const batch=await call('clarifications',{questions:(params as {questions:unknown[]}).questions});questionBatch=batch.id;ctx.abort();return {content:[{type:'text',text:'Waiting for user answers. Do not continue execution.'}],details:{batchId:batch.id}};}};
   const omissionTool:ToolDefinition={name:'record_artifact_omission',label:'Record optional artifact decision',description:'Record why design is not applicable under spec-driven conditional instructions. Never omit required artifacts. Provide the sha256 of the design instruction.',parameters:Type.Object({artifactId:Type.Literal('design'),reason:Type.String({minLength:1,maxLength:2000}),instructionHash:Type.String()}),execute:async(_id,params)=>{if(task.stage!=='Propose'||questionBatch)throw new Error('Omission unavailable');const {instruction}=await designInstructions();const omission=verifyOmission(params,instruction);await call('artifact-omission',omission);omissions.splice(0,omissions.length,omission);return {content:[{type:'text',text:'Conditional omission recorded with evidence.'}],details:{}};}};
-  const result=await createAgentSession({cwd,agentDir,modelRuntime:runtime,model:runtime.getModel('gateway','agent-default'),sessionManager:manager,settingsManager:SettingsManager.inMemory({retry:{enabled:false}}),resourceLoader:loader,tools:[...guarded.map(tool=>tool.name),'request_clarification','record_artifact_omission'],customTools:[...guarded,clarificationTool,omissionTool]});session=result.session;
+  const webSearchTool:ToolDefinition={
+   name:'web_search',
+   label:'Web search',
+   description:'Search the web for up-to-date technical documentation, libraries, or external knowledge. Returns a list of structured results with title, url, and snippet.',
+   parameters:Type.Object({
+    query:Type.String({minLength:1,maxLength:1000,description:'Search query keyword'}),
+    numResults:Type.Optional(Type.Integer({minimum:1,maximum:10,description:'Number of results to return (default 5)'}))
+   }),
+   execute:async(_toolId,params)=>{
+    try{
+     const res=await call('web-search',params);
+     const items=res?.results||[];
+     if(!items.length)return {content:[{type:'text',text:'No relevant search results found.'}],details:{results:[]}};
+     const formatted=items.map((it:any,idx:number)=>`[${idx+1}] ${it.title}\nURL: ${it.url}\n${it.snippet}`).join('\n\n');
+     return {content:[{type:'text',text:formatted}],details:{results:items}};
+    }catch(err:any){
+     return {content:[{type:'text',text:`Web search failed: ${err.message||'network error'}`}],details:{error:err.message}};
+    }
+   }
+  };
+  const fetchContentTool:ToolDefinition={
+   name:'fetch_content',
+   label:'Fetch webpage content',
+   description:'Fetch and parse public HTTP/HTTPS URL into readable Markdown text. Use this to read documentation, articles, or web pages.',
+   parameters:Type.Object({
+    url:Type.String({minLength:1,maxLength:2000,description:'Target webpage HTTP/HTTPS URL'})
+   }),
+   execute:async(_toolId,params)=>{
+    try{
+     const res=await call('fetch-content',params);
+     return {content:[{type:'text',text:res?.content||'No content extracted'}],details:{url:(params as any).url,status:res?.status}};
+    }catch(err:any){
+     return {content:[{type:'text',text:`Fetch webpage failed: ${err.message||'network error'}`}],details:{error:err.message}};
+    }
+   }
+  };
+  const customTools=[...guarded,clarificationTool,omissionTool,webSearchTool,fetchContentTool];
+  const toolNames=[...guarded.map(tool=>tool.name),'request_clarification','record_artifact_omission','web_search','fetch_content'];
+  const result=await createAgentSession({cwd,agentDir,modelRuntime:runtime,model:runtime.getModel('gateway','agent-default'),thinkingLevel:'medium',sessionManager:manager,settingsManager:SettingsManager.inMemory({defaultThinkingLevel:'medium',retry:{enabled:false},compaction:{enabled:true,reserveTokens:16384,keepRecentTokens:20000}}),resourceLoader:loader,tools:toolNames,customTools});session=result.session;
   await call('session',{path:session.sessionFile,skillVersion:createHash('sha256').update(skill).digest('hex')});
-  session.subscribe((event:any)=>{if(event.type==='message_update'&&event.assistantMessageEvent.type==='text_delta')pending.push({sequence:++sequence,type:'text_delta',payload:{text:event.assistantMessageEvent.delta}});else if(['tool_execution_start','tool_execution_end'].includes(event.type))pending.push({sequence:++sequence,type:event.type,payload:event});});
+  session.subscribe((event:any)=>{
+   if(event.type==='message_update'){
+    if(event.assistantMessageEvent.type==='text_delta')pending.push({sequence:++sequence,type:'text_delta',payload:{text:event.assistantMessageEvent.delta}});
+    else if(event.assistantMessageEvent.type==='thinking_delta')pending.push({sequence:++sequence,type:'thinking_delta',payload:{text:event.assistantMessageEvent.delta}});
+   }else if(['tool_execution_start','tool_execution_end'].includes(event.type)){
+    pending.push({sequence:++sequence,type:event.type,payload:event});
+   }
+  });
   let flushing=false;
   const flush=async()=>{if(flushing)return;flushing=true;try{while(pending.length){const batch=pending.slice(0,50);await call('events',{events:batch});pending.splice(0,batch.length);}}finally{flushing=false;}};
   const eventTimer=setInterval(()=>{void flush().catch(()=>{});},500);
@@ -104,7 +171,7 @@ export async function runAgent(paths={workspaces:'/workspaces',sessions:'/sessio
     }
     await call('ack',{commandId:msg.id}).catch(()=>{});
    }
-   step='validation';
+   step='mr';
    const {runMRStage}=await import('./mr-service.ts');
    const mrResult=await runMRStage({
     cwd,
@@ -175,6 +242,6 @@ export async function runAgent(paths={workspaces:'/workspaces',sessions:'/sessio
   }
   await call('complete',{status:cancelled||'completed',summary:session.getLastAssistantText()||'',validation:validationEvidence,workspaceRevision,artifacts,blockers:[]});void polling;
   }finally{clearInterval(eventTimer);}
- }catch(error){finished=true;commandAbort.abort();await collect().catch(()=>{});const source=error as {category?:DiagnosticCategory;requestId?:string;attemptCount?:number};const diagnostic=createDiagnostic({step,requestId:source.requestId,attemptCount:source.attemptCount,message:error instanceof Error?error.message:'Agent failed',category:source.category|| (step==='validation'?'artifact_validation':step==='repository'?'runtime_environment':'unknown'),safeBoundary:step==='model'||(step==='validation'&&!String(error).includes('unconfirmed'))},[token,process.env.GATEWAY_TOKEN||'']);await call('complete',{status:'failed',error:diagnostic.message,diagnostic}).catch(()=>{});throw error;}finally{clearInterval(heartbeat);session?.dispose();}
+ }catch(error){finished=true;commandAbort.abort();await collect().catch(()=>{});const source=error as {category?:DiagnosticCategory;requestId?:string;attemptCount?:number};const diagnostic=createDiagnostic({step,requestId:source.requestId,attemptCount:source.attemptCount,message:error instanceof Error?error.message:'Agent failed',category:source.category|| (step==='mr' ? 'runtime_environment' : step==='validation' ? 'artifact_validation' : step==='repository' ? 'runtime_environment' : 'unknown'),safeBoundary:step==='model'||(step==='validation'&&!String(error).includes('unconfirmed'))},[token,process.env.GATEWAY_TOKEN||'']);await call('complete',{status:'failed',error:diagnostic.message,diagnostic}).catch(()=>{});throw error;}finally{clearInterval(heartbeat);session?.dispose();}
 }
 if(process.env.AGENT_SERVER==='true')await runAgent();

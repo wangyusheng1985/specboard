@@ -1,7 +1,7 @@
 import Docker from 'dockerode';
 import {randomUUID} from 'node:crypto';
 
-export function agentContainerConfig(job:{id:string;generation:number;projectId:string;token:string},options:{image:string;apiUrl:string;network:string;workspaceVolume:string;sessionVolume:string;gatewayToken:string}){
+export function agentContainerConfig(job:{id:string;generation:number;projectId?:string|null;token:string},options:{image:string;apiUrl:string;network:string;workspaceVolume:string;sessionVolume:string;gatewayToken:string}){
  if(!/^[a-f0-9-]{36}$/.test(job.id)||!Number.isInteger(job.generation)||job.generation<1)throw new Error('Invalid run identity');
  return {name:`specboard-agent-${job.id}-${job.generation}`,Image:options.image,User:'1000:1000',Env:[`RUN_ID=${job.id}`,`RUN_GENERATION=${job.generation}`,`API_URL=${options.apiUrl}`,`AGENT_TOKEN=${job.token}`,`GATEWAY_TOKEN=${options.gatewayToken}`],Labels:{'specboard.managed':'true','specboard.run':job.id,'specboard.generation':String(job.generation)},HostConfig:{ReadonlyRootfs:true,Memory:2*1024**3,NanoCpus:2e9,PidsLimit:256,CapDrop:['ALL'],SecurityOpt:['no-new-privileges'],NetworkMode:options.network,Tmpfs:{'/tmp':'rw,nosuid,exec,size=268435456'},Mounts:[{Type:'volume' as const,Source:options.workspaceVolume,Target:'/workspaces'},{Type:'volume' as const,Source:options.sessionVolume,Target:'/sessions'}]}};
 }

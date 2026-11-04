@@ -186,6 +186,99 @@ test('runMRStage diagnoses failed CI job, prompts session for fix, pushes and re
  }
 });
 
+test('runMRStage recognizes fixes committed directly by agent session and pushes to remote', async () => {
+ let pipelineRound = 1;
+ const gitCalls: string[] = [];
+
+ const server = createServer((req, res) => {
+  const url = new URL(req.url!, `http://${req.headers.host}`);
+  res.setHeader('content-type', 'application/json');
+
+  if (url.pathname.endsWith('/merge_requests')) {
+   return res.end(JSON.stringify([{
+    id: 30,
+    iid: 12,
+    title: 'feat: Agent direct commit',
+    web_url: 'https://gitlab.example.test/group/project/-/merge_requests/12',
+    source_branch: 'specboard/t-direct-commit',
+    target_branch: 'main',
+    state: 'opened'
+   }]));
+  }
+
+  if (url.pathname.endsWith('/pipelines')) {
+   return res.end(JSON.stringify([{
+    id: pipelineRound === 1 ? 101 : 102,
+    iid: pipelineRound,
+    status: pipelineRound === 1 ? 'failed' : 'success',
+    ref: 'specboard/t-direct-commit',
+    sha: 'abcdef',
+    web_url: `https://gitlab.example.test/pipelines/${pipelineRound}`
+   }]));
+  }
+
+  if (url.pathname.endsWith('/jobs')) {
+   return res.end(JSON.stringify([
+    {id: 501, name: 'test_job', status: 'failed'}
+   ]));
+  }
+
+  if (url.pathname.includes('/jobs/501/trace')) {
+   return res.end('AssertionError: expected true');
+  }
+
+  res.statusCode = 404;
+  res.end('{}');
+ });
+
+ await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+ const port = (server.address() as any).port;
+ try {
+  let simulatedAgentCommitted = false;
+  let pushCount = 0;
+  const result = await runMRStage({
+   cwd: '/tmp',
+   taskId: 't-direct-commit',
+   description: 'Agent direct commit test',
+   repositoryUrl: `http://127.0.0.1:${port}/group/project.git`,
+   defaultBranch: 'main',
+   token: 'secret',
+   git: async (args: string[]) => {
+    gitCalls.push(args.join(' '));
+    // When session prompts, agent executes git commit directly
+    if (args.includes('rev-list') && args.some(a => a.includes('t-direct-commit..HEAD'))) {
+     return simulatedAgentCommitted ? '1\n' : '0\n';
+    }
+    // git diff --cached returns empty because agent already committed
+    if (args.includes('diff') && args.includes('--cached')) {
+     return '';
+    }
+    if (args.includes('push')) {
+     pushCount++;
+     if (pushCount > 1) pipelineRound = 2;
+    }
+    return {stdout: ''};
+   },
+   call: async () => ({saved: true}),
+   session: {
+    prompt: async () => {
+     simulatedAgentCommitted = true;
+    }
+   },
+   pollIntervalMs: 10,
+   discoveryTimeoutMs: 100,
+   discoveryPollIntervalMs: 10
+  });
+
+  assert.equal(result.mr.iid, 12);
+  assert.equal(result.pipeline?.status, 'success');
+  // Verified that push was triggered after agent direct commit
+  assert.ok(gitCalls.filter(c => c.includes('push')).length >= 2);
+ } finally {
+  await new Promise<void>(resolve => server.close(() => resolve()));
+ }
+});
+
 test('runMRStage amends existing commit when branch has prior commits (squash commit)', async () => {
  const gitCalls: string[] = [];
  const server = createServer((req, res) => {
@@ -380,6 +473,52 @@ test('runMRStage retains openspec directory in commit when origin already tracks
  } finally {
   await new Promise<void>(resolve => server.close(() => resolve()));
  }
+});
+
+test('extractMeaningfulErrorTrace captures core errors and excludes runner post-cleanup noise', async () => {
+ const {extractMeaningfulErrorTrace} = await import('../src/mr-service.ts');
+
+ // 1. MSVC error followed by noisy cleanup
+ const msvcRaw = [
+  'Generating done (0.2s)',
+  'Building CXX object CMakeFiles/RetroSSHLib.dir/src/ui/SettingsDrawerWidget.cpp.obj',
+  'D:\\a\\retro-ssh\\src\\ui\\SettingsDrawerWidget.cpp(197): error C2039: \'saveProfile\': is not a member of \'ProfileManager\'',
+  'D:\\a\\retro-ssh\\src\\backend/ProfileManager.h(48): note: see declaration of \'ProfileManager\'',
+  'ninja: build stopped: subcommand failed.',
+  '##[error]Process completed with exit code 1.',
+  'Post job cleanup.',
+  'git version 2.56.0.windows.2',
+  'Temporarily overriding HOME',
+  'Adding repository directory to the temporary git global config',
+  'Cleaning up orphan processes',
+  'Terminate orphan process: pid (1416)',
+  '##[warning]Node.js 20 is deprecated.'
+ ].join('\n');
+
+ const msvcExtracted = extractMeaningfulErrorTrace(msvcRaw, 1000);
+ assert.ok(msvcExtracted.includes('error C2039: \'saveProfile\''));
+ assert.ok(msvcExtracted.includes('ninja: build stopped'));
+
+ // 2. Clang / GCC error followed by runner cleanup
+ const clangRaw = [
+  '[ 34%] Building CXX object CMakeFiles/RetroSSHLib.dir/src/ui/QuickConnectDialog.cpp.o',
+  '/Users/runner/work/src/ui/MainWindow.cpp:707:14: error: use of undeclared identifier \'m_profileTabBar\'',
+  '        if (!m_profileTabBar || m_profileTabBar->count() == 0) {',
+  '             ^',
+  '5 errors generated.',
+  'make[2]: *** [CMakeFiles/RetroSSHLib.dir/src/ui/MainWindow.cpp.o] Error 1',
+  '##[error]Process completed with exit code 2.',
+  'Post job cleanup.',
+  'git config --global --add safe.directory',
+  'Cleaning up orphan processes'
+ ].join('\n');
+
+ const clangExtracted = extractMeaningfulErrorTrace(clangRaw, 1000);
+ assert.ok(clangExtracted.includes('error: use of undeclared identifier \'m_profileTabBar\''));
+
+ // 3. Fallback when no explicit error marker
+ const plainLog = 'line 1\nline 2\nline 3\nline 4\nline 5';
+ assert.equal(extractMeaningfulErrorTrace(plainLog, 50), plainLog);
 });
 
 test('detectChangeType and renderMRDescription format type-specific MR titles and sections', async () => {

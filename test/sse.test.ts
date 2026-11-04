@@ -20,5 +20,11 @@ test('authenticated SSE resumes after a sequence cursor', async()=>{
   const reader=response.body!.getReader();const decoder=new TextDecoder();let text='';const deadline=Date.now()+3000;
   while(Date.now()<deadline&&!text.includes('second')){const result=await Promise.race([reader.read(),new Promise<{done:true;value:undefined}>(resolve=>setTimeout(()=>resolve({done:true,value:undefined}),600))]);if(result.value)text+=decoder.decode(result.value);}
   assert.match(text,/second/);await reader.cancel();
+
+  // Test SSE query token authentication
+  const tokenQueryRes=await fetch(`${base}/api/v1/events?taskId=${task.id}&after=0&token=${secret}`);
+  assert.equal(tokenQueryRes.status,200);
+  assert.match(tokenQueryRes.headers.get('content-type')||'',/text\/event-stream/);
+  await tokenQueryRes.body?.cancel();
  }finally{await app.close();await rm(dir,{recursive:true,force:true});}
 });

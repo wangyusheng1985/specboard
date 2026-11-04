@@ -1,4 +1,15 @@
 export function taskStatusLabel(task){
+ if(task.kind==='chat'){
+  if(task.status==='running'||task.status==='queued'||task.status==='claimed'||task.outcome_state==='executing'||task.outcome_state==='recovering'){
+   return '正在回答';
+  }
+  if(task.status==='failed')return '执行失败';
+  if(task.status==='interrupted')return '已中断';
+  if(task.status==='stopped')return '已停止';
+  if(task.status==='paused')return '已暂停';
+  if(task.wait_reason==='clarification_required')return '待你澄清';
+  return '就绪';
+ }
  if(task.outcome_state==='clarifying'){
   if(task.stage==='Explore'&&(task.status==='waiting_input'||task.status==='completed')&&task.wait_reason!=='clarification_required'){
    return '探索完成 · 待推进';
@@ -18,6 +29,14 @@ export function taskStatusLabel(task){
 }
 
 export function taskStatusClass(task){
+ if(task.kind==='chat'){
+  if(task.status==='running'||task.status==='queued'||task.status==='claimed'||task.outcome_state==='executing'||task.outcome_state==='recovering'){
+   return 'status-running';
+  }
+  if(task.status==='failed'||task.status==='interrupted')return 'status-failed';
+  if(task.wait_reason==='clarification_required')return 'status-waiting';
+  return 'status-delivered';
+ }
  if(task.outcome_state==='recovering'||task.outcome_state==='executing'||task.status==='running')return 'status-running';
  if(task.outcome_state==='clarifying'){
   if(task.stage==='Explore'&&(task.status==='waiting_input'||task.status==='completed')&&task.wait_reason!=='clarification_required'){

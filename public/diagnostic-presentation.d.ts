@@ -41,4 +41,12 @@ export interface FilterDiagnosticsResult{
  legacy:RunItem[];
 }
 
+export interface StructuredDiagnosisResult {
+ analysis: string;
+ suggestions: string[];
+ rawTrace: string;
+}
+
+export function normalizeStructuredDiagnosis(diagnostic: any): StructuredDiagnosisResult;
+
 export function filterVisibleDiagnostics(options:FilterDiagnosticsOptions):FilterDiagnosticsResult;

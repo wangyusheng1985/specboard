@@ -40,6 +40,17 @@ test('taskStatusLabel distinguishes genuine clarification from explore completed
  assert.equal(taskStatusClass({stage: 'Explore', status: 'waiting_input', outcome_state: 'clarifying', wait_reason: 'clarification_required'}), 'status-waiting');
 });
 
+test('taskStatusLabel and taskStatusClass handle chat mode tasks without pipeline jargon', () => {
+ assert.equal(taskStatusLabel({kind: 'chat', status: 'running'}), '正在回答');
+ assert.equal(taskStatusLabel({kind: 'chat', status: 'queued'}), '正在回答');
+ assert.equal(taskStatusLabel({kind: 'chat', status: 'completed'}), '就绪');
+ assert.equal(taskStatusLabel({kind: 'chat', status: 'waiting_input', stage: 'Explore'}), '就绪');
+ assert.equal(taskStatusLabel({kind: 'chat', status: 'waiting_input', wait_reason: 'clarification_required'}), '待你澄清');
+ assert.equal(taskStatusLabel({kind: 'chat', status: 'failed'}), '执行失败');
+ assert.equal(taskStatusClass({kind: 'chat', status: 'running'}), 'status-running');
+ assert.equal(taskStatusClass({kind: 'chat', status: 'completed'}), 'status-delivered');
+});
+
 test('user comment events can be filtered and formatted for display in task outcome', () => {
  const events = [
   {type: 'dispatch_claimed', payload: {owner: 'test'}},

@@ -38,7 +38,10 @@ export function createApp(options:AppOptions){
   res.setHeader('Referrer-Policy','no-referrer');
   try {
    if(req.method==='GET' && url.pathname==='/api/v1/events'){
-    if(!sessionFor(req) && !(req.headers.authorization?.startsWith('Bearer ')&&validSecret(req.headers.authorization.slice(7))))return send(401,{error:'Authentication failed'});
+    const queryToken = url.searchParams.get('token');
+    const hasValidBearer = Boolean(req.headers.authorization?.startsWith('Bearer ') && validSecret(req.headers.authorization.slice(7)));
+    const hasValidQuery = Boolean(queryToken && validSecret(queryToken));
+    if(!sessionFor(req) && !hasValidBearer && !hasValidQuery)return send(401,{error:'Authentication failed'});
     const taskId=url.searchParams.get('taskId');if(!taskId)throw new Error('Task not found');store.task(taskId);
     const after=Math.max(0,Number(url.searchParams.get('after')||0));
     res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','connection':'keep-alive','x-accel-buffering':'no'});res.write(': connected\n\n');

@@ -14,4 +14,26 @@ test('diagnostic storage and copy projection remove credentials before bounding 
  const diagnostic=createDiagnostic({step:'model',message:raw,details:raw},['known-value']);assert.equal(validateDiagnostic(diagnostic).category,'unknown');assert.ok(!JSON.stringify(diagnostic).includes('hunter2'));
  assert.equal(createDiagnostic({step:'tool',message:'x'.repeat(3000),details:'x'.repeat(9000)}).details.length,8000);
  assert.throws(()=>validateDiagnostic({...diagnostic,requestId:{secret:'no'}}));assert.throws(()=>validateDiagnostic({...diagnostic,attemptCount:-1}));assert.throws(()=>validateDiagnostic(null));assert.throws(()=>validateDiagnostic({...diagnostic,step:'bad'}));assert.throws(()=>validateDiagnostic({...diagnostic,message:'x'.repeat(2001)}));
+ assert.throws(()=>validateDiagnostic({...diagnostic,structured:'bad' as any}));
+ assert.throws(()=>validateDiagnostic({...diagnostic,structured:{analysis:123,suggestions:[],rawTrace:''} as any}));
+ const validStructured=createDiagnostic({
+  step:'dispatch',
+  message:'failure',
+  structured:{
+   analysis:'root cause',
+   suggestions:['fix it'],
+   rawTrace:'trace'
+  }
+ });
+ assert.ok(validStructured.structured);
+ assert.equal(validStructured.structured.analysis,'root cause');
+ assert.deepEqual(validStructured.structured.suggestions,['fix it']);
+ assert.equal(validateDiagnostic(validStructured).structured?.analysis,'root cause');
+
+ const mrDiagnostic = createDiagnostic({
+  step: 'mr',
+  message: 'MR stage failed'
+ });
+ assert.equal(mrDiagnostic.step, 'mr');
+ assert.equal(validateDiagnostic(mrDiagnostic).step, 'mr');
 });

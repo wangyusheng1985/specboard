@@ -144,3 +144,58 @@ test('GitHubClient queries workflow runs and failed job logs', async () => {
   await new Promise<void>(resolve => server.close(() => resolve()));
  }
 });
+
+test('GitHubClient extracts cancelled and timed_out jobs and generates fallback trace when logs unavailable', async () => {
+ const server = createServer((req, res) => {
+  const url = new URL(req.url!, `http://${req.headers.host}`);
+  res.setHeader('content-type', 'application/json');
+
+  if (url.pathname === '/repos/owner/repo/actions/runs/3030/jobs' && req.method === 'GET') {
+   return res.end(JSON.stringify({
+    total_count: 2,
+    jobs: [
+     {
+      id: 4041,
+      name: 'Build (macos-13 - x86_64)',
+      status: 'completed',
+      conclusion: 'cancelled',
+      html_url: 'https://github.com/owner/repo/actions/runs/3030/job/4041',
+      labels: ['macos-13', 'x86_64'],
+      runner_name: 'GitHub Actions 1'
+     },
+     {
+      id: 4042,
+      name: 'lint',
+      status: 'completed',
+      conclusion: 'success'
+     }
+    ]
+   }));
+  }
+
+  // 404 on log download simulating queued/cancelled job without log stream
+  if (url.pathname === '/repos/owner/repo/actions/jobs/4041/logs' && req.method === 'GET') {
+   res.statusCode = 404;
+   return res.end('{"message":"Not Found"}');
+  }
+
+  res.statusCode = 404;
+  res.end('{}');
+ });
+
+ await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+ const port = (server.address() as any).port;
+ try {
+  const client = new GitHubClient(`http://127.0.0.1:${port}`, 'owner/repo', 'test-github-token');
+  const jobLogs = await client.getFailedJobLogs(3030);
+  assert.ok(jobLogs);
+  assert.equal(jobLogs.name, 'Build (macos-13 - x86_64)');
+  assert.match(jobLogs.trace, /did not succeed/);
+  assert.match(jobLogs.trace, /Conclusion: cancelled/);
+  assert.match(jobLogs.trace, /Runner labels: macos-13, x86_64/);
+  assert.match(jobLogs.trace, /Runner name: GitHub Actions 1/);
+  assert.match(jobLogs.trace, /Job URL: https:\/\/github.com\/owner\/repo\/actions\/runs\/3030\/job\/4041/);
+ } finally {
+  await new Promise<void>(resolve => server.close(() => resolve()));
+ }
+});

@@ -58,3 +58,57 @@ test('createGitPlatformClient handles GitHub PR and Actions workflow', async () 
   await new Promise<void>(resolve => server.close(() => resolve()));
  }
 });
+
+test('getLatestPipeline detects failed job even when workflow run status is still in_progress', async () => {
+ const server = createServer((req, res) => {
+  const url = new URL(req.url!, `http://${req.headers.host}`);
+  res.setHeader('content-type', 'application/json');
+
+  if (url.pathname === '/repos/owner/repo/actions/runs') {
+   return res.end(JSON.stringify({
+    workflow_runs: [{
+     id: 99999,
+     name: 'ci',
+     status: 'in_progress',
+     conclusion: null,
+     html_url: 'https://github.com/owner/repo/actions/runs/99999',
+     head_branch: 'feat-failfast'
+    }]
+   }));
+  }
+
+  if (url.pathname === '/repos/owner/repo/actions/runs/99999/jobs') {
+   return res.end(JSON.stringify({
+    jobs: [
+     {id: 11, name: 'build-macos', status: 'completed', conclusion: 'failure'},
+     {id: 12, name: 'build-win', status: 'in_progress', conclusion: null}
+    ]
+   }));
+  }
+
+  if (url.pathname === '/repos/owner/repo/actions/jobs/11/logs') {
+   return res.end('Compilation error at line 42');
+  }
+
+  res.statusCode = 404;
+  res.end('{}');
+ });
+
+ await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+ const port = (server.address() as any).port;
+ process.env.TEST_GITHUB_HOST = `127.0.0.1:${port}`;
+ try {
+  const client = createGitPlatformClient(`http://127.0.0.1:${port}/owner/repo.git`, 'test-token');
+  const pipeline = await client.getLatestPipeline('feat-failfast');
+  assert.ok(pipeline);
+  assert.equal(pipeline.status, 'failed');
+  assert.equal(pipeline.id, 99999);
+
+  const failedTrace = await client.getFailedJobTrace(99999);
+  assert.equal(failedTrace?.name, 'build-macos');
+  assert.match(failedTrace?.trace || '', /Compilation error/);
+ } finally {
+  delete process.env.TEST_GITHUB_HOST;
+  await new Promise<void>(resolve => server.close(() => resolve()));
+ }
+});

@@ -16,6 +16,7 @@ export interface UnifiedPipeline {
  status: 'pending'|'running'|'success'|'failed'|string;
  web_url: string;
  is_actions: boolean;
+ sha?: string;
 }
 
 export interface GitPlatformClient {
@@ -63,18 +64,25 @@ export function createGitPlatformClient(repositoryUrl: string, token: string): G
      status = 'success';
     } else if (run.conclusion === 'failure' || run.conclusion === 'timed_out' || run.conclusion === 'cancelled') {
      status = 'failed';
-    } else if (run.status === 'queued') {
-     status = 'pending';
-    } else if (run.status === 'in_progress') {
-     status = 'running';
     } else {
-     status = run.conclusion || run.status;
+     // Fail-fast: check if any individual job in the workflow has already failed
+     const failedJob = await client.getFailedJobLogs(run.id).catch(() => null);
+     if (failedJob) {
+      status = 'failed';
+     } else if (run.status === 'queued') {
+      status = 'pending';
+     } else if (run.status === 'in_progress') {
+      status = 'running';
+     } else {
+      status = run.conclusion || run.status;
+     }
     }
     return {
      id: run.id,
      status,
      web_url: run.html_url,
-     is_actions: true
+     is_actions: true,
+     sha: run.head_sha
     };
    },
    async getFailedJobTrace(pipelineId: number) {
@@ -105,15 +113,17 @@ export function createGitPlatformClient(repositoryUrl: string, token: string): G
     id: p.id,
     status: p.status,
     web_url: p.web_url,
-    is_actions: false
+    is_actions: false,
+    sha: p.sha
    };
   },
   async getFailedJobTrace(pipelineId: number) {
    const jobs = await gitlab.getPipelineJobs(pipelineId);
-   const failed = jobs.find(j => j.status === 'failed');
+   const abnormalStatuses = ['failed', 'canceled', 'canceling', 'skipped', 'manual'];
+   const failed = jobs.find(j => abnormalStatuses.includes(j.status)) || jobs.find(j => j.status !== 'success');
    if (!failed) return null;
    const trace = await gitlab.getJobTrace(failed.id).catch(() => '');
-   return {name: failed.name, trace};
+   return {name: failed.name, trace: trace || `Job "${failed.name}" status: ${failed.status}`};
   }
  };
 }

@@ -48,10 +48,10 @@ export function piFactory(store:Store, workspaces:Workspaces, sessionsRoot:strin
   const model=provider && modelId ? runtime.getModel(provider,modelId) : (await runtime.getAvailable())[0];
   if(!model)throw new Error('No Pi model available; configure PI_PROVIDER, PI_MODEL and PI_API_KEY');
   const settings=SettingsManager.inMemory();
-  const project=workspaces.project(task.projectId);
+  const project=task.projectId ? workspaces.project(task.projectId) : { name: 'General Chat', repositoryUrl: '', defaultBranch: 'main' };
   const resourceLoader=new DefaultResourceLoader({cwd,agentDir,settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,
    appendSystemPromptOverride:()=>[content,`You are executing stage ${task.stage} for task ${task.id}. Change name: task-${task.id}. Project: ${project.name}. Stay in this stage. Never advance automatically. Call request_stage_transition only for an explicit user transition request; the host will ask for confirmation. Do not push, merge, deploy, or change remote resources without an explicit user instruction. End with results, validation evidence and blockers.`,
-    'The host stage transition is authorization to perform this stage within the task worktree. Ask substantive questions in the conversation and stop to await input. Explore can generate prototype or summary artifacts when helpful. Propose writes planning artifacts only. Apply implements the selected change. Archive checks completion then archives that change.']});
+    'The host stage transition is authorization to perform this stage within the task worktree. Ask substantive questions in the conversation and stop to await input. Explore can generate prototype, html mockup, demo or summary artifacts directly in the workspace when requested without asking for permission. Propose writes planning artifacts only. Apply implements the selected change. Archive checks completion then archives that change.']});
   await resourceLoader.reload();
   const {session}=await createAgentSession({cwd,agentDir,modelRuntime:runtime,model,resourceLoader,settingsManager:settings,sessionManager,
    tools:task.stage==='Explore'?['read','grep','find','ls','edit','write','openspec','request_stage_transition']:['read','grep','find','ls','bash','edit','write','request_stage_transition'],

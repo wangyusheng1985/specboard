@@ -27,6 +27,9 @@ export interface GitHubJob {
  status: string;
  conclusion: string | null;
  html_url?: string;
+ labels?: string[];
+ runner_name?: string | null;
+ runner_group_name?: string | null;
 }
 
 export class GitHubClient {
@@ -208,19 +211,44 @@ export class GitHubClient {
     run_id: runId,
     per_page: 50
    });
-   const failedJob = res.data.jobs.find(j => j.conclusion === 'failure');
-   if (!failedJob) return null;
+   const abnormalConclusions = ['failure', 'cancelled', 'timed_out', 'action_required', 'neutral'];
+   const abnormalJob = res.data.jobs.find(j =>
+    (j.conclusion && abnormalConclusions.includes(j.conclusion)) ||
+    (j.status === 'completed' && j.conclusion !== 'success' && j.conclusion !== 'skipped')
+   );
+   if (!abnormalJob) return null;
+
+   const synthesizeFallbackTrace = (job: any): string => {
+    const details = [
+     `Job "${job.name}" did not succeed.`,
+     `Status: ${job.status || 'unknown'}`,
+     `Conclusion: ${job.conclusion || 'unknown'}`
+    ];
+    if (job.labels && Array.isArray(job.labels) && job.labels.length > 0) {
+     details.push(`Runner labels: ${job.labels.join(', ')}`);
+    }
+    if (job.runner_name) {
+     details.push(`Runner name: ${job.runner_name}`);
+    }
+    if (job.html_url) {
+     details.push(`Job URL: ${job.html_url}`);
+    }
+    return details.join('\n');
+   };
 
    try {
     const logRes = await this.octokit.rest.actions.downloadJobLogsForWorkflowRun({
      owner: this.owner,
      repo: this.repo,
-     job_id: failedJob.id
+     job_id: abnormalJob.id
     });
-    const trace = typeof logRes.data === 'string' ? logRes.data : String(logRes.data || '');
-    return {name: failedJob.name, trace};
+    const trace = typeof logRes.data === 'string' ? logRes.data : '';
+    if (trace.trim()) {
+     return {name: abnormalJob.name, trace};
+    }
+    return {name: abnormalJob.name, trace: synthesizeFallbackTrace(abnormalJob)};
    } catch {
-    return {name: failedJob.name, trace: ''};
+    return {name: abnormalJob.name, trace: synthesizeFallbackTrace(abnormalJob)};
    }
   } catch {
    return null;

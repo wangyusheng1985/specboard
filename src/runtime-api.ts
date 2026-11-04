@@ -20,15 +20,24 @@ import {projectOutcome} from './outcomes.ts';
 import {GitLabClient} from './gitlab-client.ts';
 import {GitHubClient} from './github-client.ts';
 import {isGitHubUrl} from './git-platform.ts';
+import {performWebSearch, fetchWebContent} from './web-tools.ts';
 
 const object={type:'object',additionalProperties:true};
 const error={type:'object',required:['error','requestId'],properties:{error:{type:'object',required:['code','message'],properties:{code:{type:'string'},message:{type:'string'}}},requestId:{type:'string'}}};
 const params={type:'object',required:['id'],properties:{id:{type:'string',format:'uuid'}}};
-const taskBody={type:'object',additionalProperties:false,required:['projectId','description'],properties:{projectId:{type:'string',format:'uuid'},description:{type:'string',minLength:1,maxLength:20000}}};
+const taskBody={type:'object',additionalProperties:false,required:['projectId','description'],properties:{projectId:{type:'string',format:'uuid'},description:{type:'string',minLength:1,maxLength:20000},kind:{type:'string',enum:['work','chat']}}};
 const commandBody={type:'object',additionalProperties:false,required:['type','payload'],properties:{type:{type:'string',enum:['message','pause','stop','resume','retry','transition','confirm_transition','approve_proposal','archive']},payload:object}};
 export async function createRuntimeApi(options:{databaseUrl:string;secret:string;dispatcherToken:string;gatewayUrl:string;gatewayAdminToken:string;encryptionKey:string}){
  const pool=new pg.Pool({connectionString:options.databaseUrl,max:10});await migrateRuntime(pool);
- const service=new RuntimeService(pool),app=Fastify({logger:false,bodyLimit:65536});
+ const service=new RuntimeService(pool,{gatewayUrl:options.gatewayUrl}),app=Fastify({logger:false,bodyLimit:65536});
+ app.addContentTypeParser('application/json',{parseAs:'string'},(req,body,done)=>{
+  if(typeof body!=='string'||body.trim().length===0){
+   done(null,{});
+   return;
+  }
+  const defaultParser=app.getDefaultJsonParser('ignore','ignore');
+  defaultParser(req,body,done);
+ });
  await app.register(swagger,{openapi:{openapi:'3.1.0',info:{title:'Specboard API',version:'1.0.0'},components:{securitySchemes:{bearerAuth:{type:'http',scheme:'bearer'}}},security:[{bearerAuth:[]}]}});
  const docsSessions=new Map<string,number>();
  app.addHook('onRequest',async(req,reply)=>{
@@ -39,10 +48,21 @@ export async function createRuntimeApi(options:{databaseUrl:string;secret:string
  });
  await app.register(swaggerUi,{routePrefix:'/documentation',uiConfig:{persistAuthorization:false}});
  await app.register(staticFiles,{root:fileURLToPath(new URL('../public',import.meta.url)),prefix:'/'});
- app.setErrorHandler((e:any,req,reply)=>{if(!(e instanceof ApiError)&&!e.validation)console.error('Unhandled API Error:',e);const status=e instanceof ApiError?e.status:e.validation?400:500;reply.code(status).send({error:{code:e instanceof ApiError?e.code:e.validation?'invalid_request':'internal_error',message:status===500?'Request failed':e.message},requestId:req.id});});
+ app.setErrorHandler((e:any,req,reply)=>{
+  const isClient=(e instanceof ApiError)||(typeof e.statusCode==='number'&&e.statusCode>=400&&e.statusCode<500)||Boolean(e.validation);
+  if(!isClient)console.error('Unhandled API Error:',e);
+  const status=e instanceof ApiError?e.status:e.validation?400:(typeof e.statusCode==='number'&&e.statusCode>=400&&e.statusCode<500)?e.statusCode:500;
+  const code=e instanceof ApiError?e.code:e.validation?'invalid_request':e.code||(status===500?'internal_error':'bad_request');
+  reply.code(status).send({error:{code,message:status===500?'Request failed':e.message},requestId:req.id});
+ });
  const clarification=new ClarificationService(service);
  const responses={200:object,201:object,202:object,400:error,401:error,403:error,404:error,409:error,500:error};
- const publicAuth=async(req:any)=>{if(!constantTimeEqual(req.headers.authorization||'',`Bearer ${options.secret}`))throw new ApiError(401,'unauthorized','Bearer Token required');};
+ const publicAuth=async(req:any)=>{
+  const tokenHeader=req.headers.authorization||'';
+  const queryToken=typeof req.query?.token==='string'?req.query.token:'';
+  const authed=constantTimeEqual(tokenHeader,`Bearer ${options.secret}`)||(queryToken!==''&&constantTimeEqual(queryToken,options.secret));
+  if(!authed)throw new ApiError(401,'unauthorized','Bearer Token required');
+ };
  const dispatchAuth=async(req:any)=>{if(!constantTimeEqual(req.headers.authorization||'',`Bearer ${options.dispatcherToken}`))throw new ApiError(401,'unauthorized','Dispatcher Token required');};
  const agentAuth=async(req:any)=>{const generation=Number(req.headers['x-run-generation']);if(!Number.isInteger(generation))throw new ApiError(400,'invalid_generation','X-Run-Generation required');await checkToken(pool,req.headers.authorization,'agent',req.params.id,generation);};
  function route(method:any,url:string,auth:any,handler:any,schema:any={}){app.route({method,url,preHandler:auth,schema:{response:responses,...schema},handler});}
@@ -111,13 +131,39 @@ export async function createRuntimeApi(options:{databaseUrl:string;secret:string
   });
   return reply.code(result.status).send(result.result);
  },{params});
- route('POST','/api/v1/tasks',publicAuth,async(req:any,reply:any)=>{const result=await idempotent(pool,'api',req.headers['idempotency-key'],{path:req.url,body:req.body},201,db=>service.create(db,req.body.projectId,req.body.description));return reply.code(result.status).send(result.result);},{body:taskBody});
+ route('POST','/api/v1/tasks',publicAuth,async(req:any,reply:any)=>{const result=await idempotent(pool,'api',req.headers['idempotency-key'],{path:req.url,body:req.body},201,db=>service.create(db,req.body.projectId,req.body.description,req.body.kind||'work'));return reply.code(result.status).send(result.result);},{body:taskBody});
  route('GET','/api/v1/tasks/:id',publicAuth,async(req:any)=>service.task(req.params.id),{params});
  route('DELETE','/api/v1/tasks/:id',publicAuth,async(req:any,reply:any)=>{
   const paths={workspaces:process.env.WORKSPACE_VOLUME||'/workspaces',sessions:process.env.SESSION_VOLUME||'/sessions'};
   const result=await idempotent(pool,'api',req.headers['idempotency-key'],{path:req.url,body:{}},200,db=>service.deleteTask(db,req.params.id,paths));
   return reply.code(result.status).send(result.result);
  },{params});
+ route('GET','/api/v1/chats',publicAuth,async(req:any)=>{
+  const projectId=req.query?.projectId;
+  const queryParams:any[]=[];
+  let sql="SELECT t.*,p.name AS project_name,p.repository_url AS project_repository_url FROM tasks t LEFT JOIN projects p ON p.id=t.project_id WHERE t.deleted_at IS NULL AND t.kind='chat'";
+  if(projectId){
+   sql+=" AND t.project_id=$1";
+   queryParams.push(projectId);
+  }
+  sql+=" ORDER BY t.updated_at DESC,t.id DESC LIMIT 50";
+  const rows=(await pool.query(sql,queryParams)).rows;
+  return {items:rows};
+ });
+ route('POST','/api/v1/chats',publicAuth,async(req:any,reply:any)=>{
+  const result=await idempotent(pool,'api',req.headers['idempotency-key'],{path:req.url,body:req.body},201,db=>service.create(db,req.body.projectId||null,req.body.message||req.body.description||'新会话','chat'));
+  return reply.code(result.status).send(result.result);
+ },{body:{type:'object',required:['message'],properties:{projectId:{type:['string','null']},message:{type:'string',minLength:1,maxLength:20000},description:{type:'string'}}}});
+ route('GET','/api/v1/chats/:id',publicAuth,async(req:any)=>service.task(req.params.id),{params});
+ route('DELETE','/api/v1/chats/:id',publicAuth,async(req:any,reply:any)=>{
+  const paths={workspaces:process.env.WORKSPACE_VOLUME||'/workspaces',sessions:process.env.SESSION_VOLUME||'/sessions'};
+  const result=await idempotent(pool,'api',req.headers['idempotency-key'],{path:req.url,body:{}},200,db=>service.deleteTask(db,req.params.id,paths));
+  return reply.code(result.status).send(result.result);
+ },{params});
+ route('POST','/api/v1/chats/:id/messages',publicAuth,async(req:any,reply:any)=>{
+  const result=await idempotent(pool,'api',req.headers['idempotency-key'],{path:req.url,body:req.body},202,db=>service.command(db,req.params.id,'message',{text:req.body.message}));
+  return reply.code(result.status).send(result.result);
+ },{params,body:{type:'object',required:['message'],properties:{message:{type:'string',minLength:1,maxLength:20000}}}});
  route('POST','/api/v1/tasks/:id/approve-proposal',publicAuth,async(req:any,reply:any)=>{const result=await idempotent(pool,'api',req.headers['idempotency-key'],{path:req.url,body:req.body},202,db=>service.approveProposal(db,req.params.id,req.body));return reply.code(result.status).send(result.result);},{params,body:{type:'object',required:['proposalId'],additionalProperties:false,properties:{proposalId:{type:'string',format:'uuid'},validationPlan:object}}});
  route('POST','/api/v1/tasks/:id/archive',publicAuth,async(req:any,reply:any)=>{const result=await idempotent(pool,'api',req.headers['idempotency-key'],{path:req.url,body:req.body||{}},202,db=>service.archive(db,req.params.id));return reply.code(result.status).send(result.result);},{params});
  route('POST','/api/v1/tasks/:id/commands',publicAuth,async(req:any,reply:any)=>{const result=await idempotent(pool,'api',req.headers['idempotency-key'],{path:req.url,body:req.body},202,db=>service.command(db,req.params.id,req.body.type,req.body.payload));return reply.code(result.status).send(result.result);},{params,body:commandBody});
@@ -140,9 +186,10 @@ export async function createRuntimeApi(options:{databaseUrl:string;secret:string
  route('POST','/internal/v1/runs/:id/mr',agentAuth,async(req:any)=>{
   const run=await service.active(req.params.id,Number(req.headers['x-run-generation']));
   const b=req.body;
-  await pool.query('INSERT INTO task_merge_requests(id,task_id,mr_iid,web_url,title,source_branch,target_branch,pipeline_id,pipeline_status,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(task_id) DO UPDATE SET mr_iid=excluded.mr_iid,web_url=excluded.web_url,title=excluded.title,pipeline_id=excluded.pipeline_id,pipeline_status=excluded.pipeline_status,updated_at=excluded.updated_at',[randomUUID(),run.task_id,b.mrIid,b.webUrl,b.title,b.sourceBranch,b.targetBranch,b.pipelineId,b.pipelineStatus,Date.now(),Date.now()]);
+  const pipelineId=b.pipelineId!==undefined&&b.pipelineId!==null?String(b.pipelineId):null;
+  await pool.query('INSERT INTO task_merge_requests(id,task_id,mr_iid,web_url,title,source_branch,target_branch,pipeline_id,pipeline_status,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(task_id) DO UPDATE SET mr_iid=excluded.mr_iid,web_url=excluded.web_url,title=excluded.title,pipeline_id=excluded.pipeline_id,pipeline_status=excluded.pipeline_status,updated_at=excluded.updated_at',[randomUUID(),run.task_id,b.mrIid,b.webUrl,b.title,b.sourceBranch,b.targetBranch,pipelineId,b.pipelineStatus,Date.now(),Date.now()]);
   return {saved:true};
- },{params,body:{type:'object',required:['sourceBranch','targetBranch'],properties:{mrIid:{type:'integer'},webUrl:{type:'string'},title:{type:'string'},sourceBranch:{type:'string'},targetBranch:{type:'string'},pipelineId:{type:'integer'},pipelineStatus:{type:'string'}}}});
+ },{params,body:{type:'object',required:['sourceBranch','targetBranch'],properties:{mrIid:{type:'integer'},webUrl:{type:'string'},title:{type:'string'},sourceBranch:{type:'string'},targetBranch:{type:'string'},pipelineId:{type:['number','string','integer']},pipelineStatus:{type:'string'}}}});
  app.route({method:'POST',url:'/internal/v1/runs/:id/artifact-report',preHandler:agentAuth,bodyLimit:256*1024,schema:{params,body:object,response:responses},handler:async(req:any)=>{const report=validateArtifactReport(req.body,[options.secret,options.dispatcherToken,options.gatewayAdminToken,options.encryptionKey]);return inTransaction(pool,async db=>{await db.query('SELECT id FROM agent_runs WHERE id=$1 FOR UPDATE',[req.params.id]);const run=await service.active(req.params.id,Number(req.headers['x-run-generation']),db);await db.query('INSERT INTO run_artifact_reports(run_id,task_id,stage,generation,report,created_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(run_id) DO UPDATE SET report=excluded.report,created_at=excluded.created_at',[run.id,run.task_id,run.stage,run.generation,JSON.stringify(report),Date.now()]);return {saved:true};});}});
  route('GET','/api/v1/tasks/:id/runs',publicAuth,async(req:any)=>({items:(await pool.query('SELECT r.*,x.summary,x.validation,x.artifacts,x.blockers,x.error FROM agent_runs r LEFT JOIN runtime_results x ON x.run_id=r.id WHERE task_id=$1 ORDER BY created_at',[req.params.id])).rows}),{params});
  route('GET','/api/v1/tasks/:id/proposals',publicAuth,async(req:any)=>({items:(await pool.query('SELECT * FROM runtime_proposals WHERE task_id=$1 AND confirmed=false',[req.params.id])).rows}),{params});
@@ -158,7 +205,7 @@ export async function createRuntimeApi(options:{databaseUrl:string;secret:string
  route('GET','/api/v1/lane',publicAuth,async(req:any)=>{
   const {stage,limit=20,cursor}=req.query;let anchor:any[]=[];
   if(cursor){try{anchor=JSON.parse(Buffer.from(cursor,'base64url').toString());}catch{throw new ApiError(400,'invalid_cursor','Invalid cursor');}if(anchor.length!==3||anchor[0]!==stage)throw new ApiError(400,'invalid_cursor','Cursor belongs to another lane');}
-  const rows=(await pool.query(`SELECT t.*,p.name AS project_name,p.repository_url AS project_repository_url,p.deleted_at AS project_deleted_at,(SELECT diagnostic->>'category' FROM run_diagnostics d WHERE d.task_id=t.id AND d.stage=t.stage ORDER BY d.created_at DESC LIMIT 1) AS failure_category FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.deleted_at IS NULL AND stage=$1 ${anchor.length?'AND (stage_entered_at,t.id)<($3,$4)':''} ORDER BY stage_entered_at DESC,t.id DESC LIMIT $2`,anchor.length?[stage,limit+1,anchor[1],anchor[2]]:[stage,limit+1])).rows;
+  const rows=(await pool.query(`SELECT t.*,p.name AS project_name,p.repository_url AS project_repository_url,p.deleted_at AS project_deleted_at,(SELECT diagnostic->>'category' FROM run_diagnostics d WHERE d.task_id=t.id AND d.stage=t.stage ORDER BY d.created_at DESC LIMIT 1) AS failure_category FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.deleted_at IS NULL AND (t.kind IS NULL OR t.kind='work') AND stage=$1 ${anchor.length?'AND (stage_entered_at,t.id)<($3,$4)':''} ORDER BY stage_entered_at DESC,t.id DESC LIMIT $2`,anchor.length?[stage,limit+1,anchor[1],anchor[2]]:[stage,limit+1])).rows;
   const projectedRows=rows.map((row:any)=>({...row,outcome_state:projectOutcome(row)}));
   const items=projectedRows.slice(0,limit),last=items.at(-1);return {items,hasMore:rows.length>limit,nextCursor:rows.length>limit?Buffer.from(JSON.stringify([stage,last.stage_entered_at,last.id])).toString('base64url'):null};
  },{querystring:{type:'object',required:['stage'],properties:{stage:{type:'string',enum:stages},limit:{type:'integer',minimum:1,maximum:100},cursor:{type:'string'}}}});
@@ -167,7 +214,7 @@ export async function createRuntimeApi(options:{databaseUrl:string;secret:string
   reply.hijack();reply.raw.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','connection':'keep-alive'});reply.raw.write(': connected\n\n');
   const timer=setInterval(async()=>{if(writing)return;writing=true;try{const rows=(await pool.query('SELECT * FROM runtime_events WHERE task_id=$1 AND sequence>$2 ORDER BY sequence LIMIT 100',[taskId,after])).rows;for(const event of rows){reply.raw.write(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`);after=Number(event.sequence);}}catch{reply.raw.end();clearInterval(timer);}finally{writing=false;}},500);
   req.raw.on('close',()=>clearInterval(timer));
- },{querystring:{type:'object',required:['taskId'],properties:{taskId:{type:'string',format:'uuid'},after:{type:'integer',minimum:0}}}});
+ },{querystring:{type:'object',required:['taskId'],properties:{taskId:{type:'string',format:'uuid'},after:{type:'integer',minimum:0},token:{type:'string'}}}});
  route('GET','/api/v1/llm/relays',publicAuth,async()=>{
   const response=await fetch(options.gatewayUrl+'/admin/v1/relays',{headers:{authorization:`Bearer ${options.gatewayAdminToken}`},signal:AbortSignal.timeout(10000)});
   if(!response.ok)throw new ApiError(502,'gateway_unavailable','LLM configuration service unavailable');return response.json();
@@ -180,6 +227,7 @@ export async function createRuntimeApi(options:{databaseUrl:string;secret:string
  route('POST','/internal/v1/dispatch/claim',dispatchAuth,async(req:any)=>service.claim(req.body.owner),{body:{type:'object',required:['owner'],properties:{owner:{type:'string',minLength:1}}}});
  route('POST','/internal/v1/runs/:id/workspace-lock',agentAuth,async(req:any)=>{
   const run=await service.active(req.params.id,Number(req.headers['x-run-generation'])),task=await service.task(run.task_id);
+  if(!task.project_id)return {locked:true};
   const key='workspace:'+task.project_id;
   await pool.query('UPDATE agent_runs SET step_lock=NULL WHERE lease_expires_at<$1',[Date.now()]);
   const locked=await pool.query("SELECT id FROM agent_runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id=$1) AND step_lock=$2 AND lease_expires_at>$3 AND id<>$4",[task.project_id,key,Date.now(),run.id]);
@@ -188,7 +236,9 @@ export async function createRuntimeApi(options:{databaseUrl:string;secret:string
  },{params,body:{type:'object',properties:{release:{type:'boolean'}}}});
  route('GET','/internal/v1/runs/:id/repository-credential',agentAuth,async(req:any,reply:any)=>{
   const run=await service.active(req.params.id,Number(req.headers['x-run-generation']));
-  const row=(await pool.query('SELECT encrypted_token FROM projects WHERE id=(SELECT project_id FROM tasks WHERE id=$1)',[run.task_id])).rows[0];
+  const task=await service.task(run.task_id);
+  if(!task.project_id){reply.header('cache-control','no-store');return {token:''};}
+  const row=(await pool.query('SELECT encrypted_token FROM projects WHERE id=$1',[task.project_id])).rows[0];
   reply.header('cache-control','no-store');return {token:decrypt(row.encrypted_token,options.encryptionKey)};
  },{params});
  route('POST','/internal/v1/runs/:id/session',agentAuth,async(req:any)=>{
@@ -198,12 +248,27 @@ export async function createRuntimeApi(options:{databaseUrl:string;secret:string
  route('GET','/internal/v1/runs/:id/context',agentAuth,async(req:any)=>{
   const run=await service.active(req.params.id,Number(req.headers['x-run-generation'])),task=await service.task(run.task_id);
   const previous=(await pool.query('SELECT r.stage,x.summary FROM agent_runs r JOIN runtime_results x ON x.run_id=r.id WHERE task_id=$1 ORDER BY created_at DESC LIMIT 4',[task.id])).rows;
-  const project=(await pool.query('SELECT id,name,repository_url,default_branch,git_user_name,git_user_email FROM projects WHERE id=$1',[task.project_id])).rows[0];
+  const project=task.project_id?(await pool.query('SELECT id,name,repository_url,default_branch,git_user_name,git_user_email FROM projects WHERE id=$1',[task.project_id])).rows[0]:null;
   const session=(await pool.query('SELECT path FROM runtime_sessions WHERE task_id=$1 AND stage=$2',[task.id,task.stage])).rows[0];
   const clarification=(await pool.query('SELECT b.id,b.questions,s.answers,s.additional_context FROM clarification_submissions s JOIN clarification_batches b ON b.id=s.batch_id WHERE s.continuation_run=$1',[run.id])).rows[0];
   const recovery=(await pool.query('SELECT diagnostic_id,intent FROM run_recoveries WHERE run_id=$1',[run.id])).rows[0];
-  return {run,task,project,previousResults:previous,session,clarification,recovery,workspace:{path:`/workspaces/${project.id}/tasks/${task.id}`},gatewayUrl:options.gatewayUrl};
+  const workspacePath=project?`/workspaces/${project.id}/tasks/${task.id}`:`/workspaces/_chat/${task.id}`;
+  return {run,task,project:project||null,previousResults:previous,session,clarification,recovery,workspace:{path:workspacePath},gatewayUrl:options.gatewayUrl};
  },{params});
+ route('POST','/internal/v1/runs/:id/web-search',agentAuth,async(req:any)=>{
+  await service.active(req.params.id,Number(req.headers['x-run-generation']));
+  const results=await performWebSearch(req.body.query,req.body.numResults||5);
+  return {results};
+ },{params,body:{type:'object',required:['query'],properties:{query:{type:'string'},numResults:{type:'integer',minimum:1,maximum:20}}}});
+ route('POST','/internal/v1/runs/:id/fetch-content',agentAuth,async(req:any)=>{
+  await service.active(req.params.id,Number(req.headers['x-run-generation']));
+  try{
+   const result=await fetchWebContent(req.body.url);
+   return result;
+  }catch(err:any){
+   return {url:req.body.url,content:`Fetch error: ${err.message||'Unknown error'}`,status:500};
+  }
+ },{params,body:{type:'object',required:['url'],properties:{url:{type:'string'}}}});
  route('GET','/internal/v1/runs/:id/commands',agentAuth,async(req:any)=>{
   const generation=Number(req.headers['x-run-generation']);await service.active(req.params.id,generation);
   const deadline=Date.now()+20000;
@@ -219,8 +284,25 @@ export async function createRuntimeApi(options:{databaseUrl:string;secret:string
   if(!updated.rowCount)throw new ApiError(409,'stale_run','Run is not claimable');await db.query("UPDATE tasks SET status='running',updated_at=$2 WHERE id=$1",[updated.rows[0].task_id,Date.now()]);return {registered:true};});
  },{params,body:{type:'object',required:['containerId','generation'],properties:{containerId:{type:'string'},generation:{type:'integer',minimum:1}}}});
  route('POST','/internal/v1/runs/:id/failure',dispatchAuth,async(req:any)=>{
-  const row=(await pool.query("UPDATE agent_runs SET status='interrupted',step_lock=NULL,updated_at=$2 WHERE id=$1 AND generation=$3 AND status IN ('claimed','running','waiting_input') RETURNING task_id",[req.params.id,Date.now(),req.body.generation])).rows[0];
-  if(row){const diagnostic=createDiagnostic({step:'dispatch',category:'interrupted',message:'Agent interrupted; inspect session and workspace before retry'});await pool.query('INSERT INTO run_diagnostics(id,run_id,task_id,stage,generation,diagnostic,created_at) SELECT $1,id,task_id,stage,generation,$2,$3 FROM agent_runs WHERE id=$4 ON CONFLICT(run_id) DO NOTHING',[diagnostic.id,JSON.stringify(diagnostic),Date.now(),req.params.id]);await pool.query("UPDATE tasks SET status='interrupted',updated_at=$2 WHERE id=$1",[row.task_id,Date.now()]);await service.event(pool,row.task_id,req.params.id,'error',{message:'Agent interrupted; inspect results before resume'});}
+  const row=(await pool.query("UPDATE agent_runs SET status='interrupted',step_lock=NULL,updated_at=$2 WHERE id=$1 AND generation=$3 AND status IN ('claimed','running','waiting_input') RETURNING task_id,stage",[req.params.id,Date.now(),req.body.generation])).rows[0];
+  if(row){
+   let diagnostic=createDiagnostic({step:'dispatch',category:'interrupted',message:'Agent interrupted; inspect session and workspace before retry'});
+   try{
+    const {synthesizeStructuredDiagnostic}=await import('./diagnostic-synthesizer.ts');
+    const structured=await synthesizeStructuredDiagnostic({
+     message:diagnostic.message,
+     details:diagnostic.details,
+     stage:row.stage,
+     category:diagnostic.category,
+     code:diagnostic.code,
+     gatewayUrl:options.gatewayUrl
+    });
+    diagnostic={...diagnostic,structured};
+   }catch{
+    /* ignore synthesis failure */
+   }
+   await pool.query('INSERT INTO run_diagnostics(id,run_id,task_id,stage,generation,diagnostic,created_at) SELECT $1,id,task_id,stage,generation,$2,$3 FROM agent_runs WHERE id=$4 ON CONFLICT(run_id) DO NOTHING',[diagnostic.id,JSON.stringify(diagnostic),Date.now(),req.params.id]);await pool.query("UPDATE tasks SET status='interrupted',updated_at=$2 WHERE id=$1",[row.task_id,Date.now()]);await service.event(pool,row.task_id,req.params.id,'error',{message:'Agent interrupted; inspect results before resume'});
+  }
   return {interrupted:true};
  },{params,body:{type:'object',properties:{generation:{type:'integer'},error:{type:'string'}}}});
  route('POST','/internal/v1/runs/:id/clarification-consumed',agentAuth,async(req:any)=>clarification.consume(req.params.id,Number(req.headers['x-run-generation'])),{params});

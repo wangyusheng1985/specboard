@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, realpath, stat } from 'node:fs/promises';
+import { mkdir, realpath, stat, rm } from 'node:fs/promises';
 import { resolve, join, relative, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { decrypt, encrypt } from './security.ts';
@@ -49,12 +49,18 @@ export class Workspaces {
     catch { throw new Error(`Git ${args[0]} failed; check repository access and workspace state`); }
   }
   async prepare(task: Task) {
+    if (!task.projectId) {
+      const chatPath = resolve(this.root, '_chat', task.id);
+      await mkdir(chatPath, {recursive: true});
+      return chatPath;
+    }
     const prior = this.locks.get(task.projectId) || Promise.resolve();
     const operation = prior.catch(()=>{}).then(()=>this.prepareLocked(task));
     this.locks.set(task.projectId,operation);
     try { return await operation; } finally { if(this.locks.get(task.projectId)===operation)this.locks.delete(task.projectId); }
   }
   private async prepareLocked(task: Task) {
+    if (!task.projectId) throw new Error('Task has no project');
     const project=this.project(task.projectId), repo=resolve(project.workspaceRoot,'repository'), path=resolve(project.workspaceRoot,'tasks',task.id);
     await mkdir(project.workspaceRoot,{recursive:true});
     const trustedRoot=await realpath(this.root), actualRoot=await realpath(project.workspaceRoot);
@@ -83,6 +89,11 @@ export class Workspaces {
   }
   async cleanup(task: Task) {
     if(task.status==='running' || task.status==='queued') throw new Error('Stop task before cleanup');
+    if (!task.projectId) {
+      const chatPath = resolve(this.root, '_chat', task.id);
+      await rm(chatPath, {recursive: true, force: true});
+      return;
+    }
     const project=this.project(task.projectId), expected=join(project.workspaceRoot,'tasks',task.id);
     const row=this.store.db.prepare('SELECT * FROM workspaces WHERE task_id=?').get(task.id);
     if(!row || row.path!==expected || row.project_id!==project.id) throw new Error('Workspace ownership mismatch');

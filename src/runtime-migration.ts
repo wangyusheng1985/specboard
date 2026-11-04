@@ -41,17 +41,22 @@ export async function migrateRuntime(pool:pg.Pool){
   CREATE TABLE IF NOT EXISTS recovery_decisions(id TEXT PRIMARY KEY,episode_id TEXT NOT NULL REFERENCES execution_episodes(id),origin_run TEXT NOT NULL UNIQUE REFERENCES agent_runs(id),strategy TEXT NOT NULL,attempt_no INTEGER NOT NULL,due_at BIGINT NOT NULL,successor_run TEXT UNIQUE REFERENCES agent_runs(id),session_ready_at BIGINT,container_exited_at BIGINT,status TEXT NOT NULL,revocation_version INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS proposal_approvals(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),task_version INTEGER NOT NULL,artifact_revision TEXT NOT NULL,plan JSONB NOT NULL,apply_run TEXT UNIQUE REFERENCES agent_runs(id),created_at BIGINT NOT NULL,UNIQUE(task_id,task_version,artifact_revision));
   CREATE TABLE IF NOT EXISTS validation_evidence(id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES agent_runs(id),approval_id TEXT NOT NULL REFERENCES proposal_approvals(id),command_id TEXT NOT NULL,workspace_revision TEXT NOT NULL,started_at BIGINT NOT NULL,ended_at BIGINT NOT NULL,exit_code INTEGER,timed_out BOOLEAN NOT NULL,summary TEXT NOT NULL,UNIQUE(run_id,command_id,workspace_revision));
-  CREATE TABLE IF NOT EXISTS task_merge_requests(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),mr_iid INTEGER,web_url TEXT,title TEXT,source_branch TEXT NOT NULL,target_branch TEXT NOT NULL,pipeline_id INTEGER,pipeline_status TEXT,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,UNIQUE(task_id));
+  CREATE TABLE IF NOT EXISTS task_merge_requests(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),mr_iid INTEGER,web_url TEXT,title TEXT,source_branch TEXT NOT NULL,target_branch TEXT NOT NULL,pipeline_id BIGINT,pipeline_status TEXT,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,UNIQUE(task_id));
+  ALTER TABLE task_merge_requests ALTER COLUMN pipeline_id TYPE BIGINT;
   ALTER TABLE projects ADD COLUMN IF NOT EXISTS git_user_name TEXT;
   ALTER TABLE projects ADD COLUMN IF NOT EXISTS git_user_email TEXT;
   ALTER TABLE projects ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
   ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_stage_check;
   ALTER TABLE tasks ADD CONSTRAINT tasks_stage_check CHECK(stage IN ('Explore','Propose','Apply','MR','Archive'));
+  ALTER TABLE tasks ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'work';
+  ALTER TABLE tasks ALTER COLUMN project_id DROP NOT NULL;
   ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
   INSERT INTO schema_migrations(version) VALUES('outcomes-v1') ON CONFLICT DO NOTHING;
   INSERT INTO schema_migrations(version) VALUES('mr-stage-v1') ON CONFLICT DO NOTHING;
+  INSERT INTO schema_migrations(version) VALUES('mr-pipeline-bigint-v1') ON CONFLICT DO NOTHING;
   INSERT INTO schema_migrations(version) VALUES('task-soft-delete-v1') ON CONFLICT DO NOTHING;
   INSERT INTO schema_migrations(version) VALUES('project-soft-delete-v1') ON CONFLICT DO NOTHING;
+  INSERT INTO schema_migrations(version) VALUES('chat-mode-v1') ON CONFLICT DO NOTHING;
   INSERT INTO schema_migrations(version) VALUES('runtime-v1') ON CONFLICT DO NOTHING;`);
   await client.query('COMMIT');
  }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}

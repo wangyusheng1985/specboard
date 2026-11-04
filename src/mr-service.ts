@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import {createGitPlatformClient,type UnifiedMergeRequest,type UnifiedPipeline} from './git-platform.ts';
 
 export interface MRStageContext {
@@ -13,6 +15,50 @@ export interface MRStageContext {
  pollIntervalMs?: number;
  maxPolls?: number;
  maxRounds?: number;
+ discoveryTimeoutMs?: number;
+ discoveryPollIntervalMs?: number;
+ previousPipelineId?: number;
+}
+
+export function hasRepoCIConfig(cwd: string, isGitHub: boolean): boolean {
+ try {
+  if (isGitHub) {
+   const workflowsDir = path.join(cwd, '.github', 'workflows');
+   if (!fs.existsSync(workflowsDir)) return false;
+   const entries = fs.readdirSync(workflowsDir);
+   return entries.some(f => f.endsWith('.yml') || f.endsWith('.yaml'));
+  } else {
+   const gitlabCiFile = path.join(cwd, '.gitlab-ci.yml');
+   return fs.existsSync(gitlabCiFile);
+  }
+ } catch {
+  return false;
+ }
+}
+
+export function extractMeaningfulErrorTrace(rawTrace: string, maxChars = 3000): string {
+ if (!rawTrace) return '';
+ const lines = rawTrace.split('\n');
+ const errorIndices: number[] = [];
+ for (let i = 0; i < lines.length; i++) {
+  const line = lines[i];
+  if (/error(\s|:)|FAILED:|fatal:|error C\d+:|##\[error\]|clang: error|ninja: build stopped/i.test(line)) {
+   if (!/Process completed with exit code/i.test(line)) {
+    errorIndices.push(i);
+   }
+  }
+ }
+
+ if (errorIndices.length > 0) {
+  const targetIdx = errorIndices[errorIndices.length - 1];
+  const start = Math.max(0, targetIdx - 35);
+  const end = Math.min(lines.length, targetIdx + 20);
+  const snippet = lines.slice(start, end).join('\n');
+  if (snippet.length <= maxChars) return snippet;
+  return snippet.slice(-maxChars);
+ }
+
+ return rawTrace.slice(-maxChars);
 }
 
 export type MRChangeType = 'feat' | 'fix' | 'docs' | 'refactor' | 'perf' | 'ci' | 'chore';
@@ -129,7 +175,7 @@ export async function runMRStage(ctx: MRStageContext) {
   call,
   session,
   pollIntervalMs = 5000,
-  maxPolls = 30,
+  maxPolls = 120,
   maxRounds = 5
  } = ctx;
 
@@ -217,6 +263,10 @@ export async function runMRStage(ctx: MRStageContext) {
  // 2. Push branch to remote
  await git(['push', '-f', '-u', 'origin', `${branch}:${branch}`], cwd);
 
+ const headShaRes = await git(['rev-parse', 'HEAD'], cwd).catch(() => '');
+ const currentSha = (typeof headShaRes === 'string' ? headShaRes : headShaRes?.stdout || '').trim();
+ const previousPipelineId = ctx.previousPipelineId;
+
  // 3. Create or get/update MR
  // 3. Create or get/update MR / PR
  const mr: UnifiedMergeRequest = await platform.createOrUpdateMR({
@@ -235,8 +285,74 @@ export async function runMRStage(ctx: MRStageContext) {
   pipelineStatus: 'pending'
  });
 
- // 4. Poll pipeline / Actions and repair if needed
+ // 4. Discover initial pipeline (wait for asynchronous trigger)
+ const discoveryTimeout = ctx.discoveryTimeoutMs ?? 45000;
+ const discoveryInterval = ctx.discoveryPollIntervalMs ?? Math.min(pollIntervalMs, 3000);
+ const discoveryStart = Date.now();
+
+ const isPipelineMatching = (p: UnifiedPipeline | null): boolean => {
+  if (!p) return false;
+  if (previousPipelineId && p.id === previousPipelineId) return false;
+  if (currentSha && p.sha && p.sha !== currentSha) return false;
+  return true;
+ };
+
  let pipeline: UnifiedPipeline | null = await platform.getLatestPipeline(branch);
+ if (!isPipelineMatching(pipeline)) {
+  pipeline = null;
+ }
+
+ while (!pipeline && (Date.now() - discoveryStart < discoveryTimeout)) {
+  await new Promise(r => setTimeout(r, discoveryInterval));
+  const candidate = await platform.getLatestPipeline(branch);
+  if (isPipelineMatching(candidate)) {
+   pipeline = candidate;
+  }
+ }
+
+ if (!pipeline) {
+  const hasCi = hasRepoCIConfig(cwd, platform.isGitHub);
+  if (hasCi) {
+   throw new Error(`${platformName} ${ciOrActions} workflow was not triggered within ${Math.round(discoveryTimeout / 1000)}s`);
+  }
+
+  // Repository does not configure CI/Actions: safely mark as none
+  await call('mr', {
+   mrIid: mr.iid,
+   webUrl: mr.web_url,
+   title: mr.title,
+   sourceBranch: mr.source_branch,
+   targetBranch: mr.target_branch,
+   pipelineStatus: 'none'
+  });
+
+  return {
+   mr,
+   pipeline: null,
+   validation: [{
+    command: `${platform.isGitHub ? 'github-actions' : 'gitlab-ci'}:none`,
+    commandId: 'pipeline-none',
+    startedAt: Date.now(),
+    endedAt: Date.now(),
+    exitCode: 0,
+    timedOut: false,
+    summary: `${platformName} ${prOrMr} created without ${ciOrActions} pipeline configured`
+   }]
+  };
+ }
+
+ // 5. Pipeline discovered: update backend with initial pipelineId and status
+ await call('mr', {
+  mrIid: mr.iid,
+  webUrl: mr.web_url,
+  title: mr.title,
+  sourceBranch: mr.source_branch,
+  targetBranch: mr.target_branch,
+  pipelineId: pipeline.id,
+  pipelineStatus: pipeline.status
+ });
+
+ // 6. Poll execution and repair if needed
  let rounds = 0;
 
  while (rounds < maxRounds) {
@@ -256,48 +372,91 @@ export async function runMRStage(ctx: MRStageContext) {
    pipeline = await platform.getLatestPipeline(branch);
   }
 
-  if (!pipeline || pipeline.status === 'success') {
+  if (pipeline && ['pending', 'running', 'created', 'waiting_for_resource', 'preparing'].includes(pipeline.status)) {
+   throw new Error(`${platformName} ${ciOrActions} timed out waiting for completion after ${Math.round((maxPolls * pollIntervalMs) / 1000)}s`);
+  }
+
+  if (pipeline?.status === 'success') {
    break;
   }
 
-  if (pipeline.status === 'failed') {
+  if (pipeline?.status === 'failed') {
    rounds++;
    const failed = await platform.getFailedJobTrace(pipeline.id);
+   const jobName = failed?.name?.trim() ? failed.name : `${platformName} ${ciOrActions} Job`;
+   const rawTrace = failed?.trace || '';
 
    if (session) {
-    await session.prompt(`${platformName} ${ciOrActions} Job "${failed?.name || 'test'}" failed on ${ciOrActions} #${pipeline.id}.\nFailure log:\n${(failed?.trace || '').slice(-3000)}\n\nPlease diagnose and modify the workspace files to fix this ${ciOrActions} failure.`);
+    const errorSnippet = extractMeaningfulErrorTrace(rawTrace, 3000);
+    await session.prompt(`${platformName} ${ciOrActions} Job "${jobName}" failed on ${ciOrActions} #${pipeline.id}.\nFailure log:\n${errorSnippet}\n\nPlease diagnose and modify the workspace files (including CI configurations under .github/workflows/ or project source files) to fix this failure. If the failure indicates an unavailable or deprecated runner (e.g. macos-13), update the workflow matrix accordingly.`);
    }
 
    await git(['add', '.'], cwd);
    await sanitizeOpenspecAsset();
    const diff = await git(['diff', '--cached', '--name-only'], cwd);
-   const hasFixes = typeof diff === 'string' ? Boolean(diff.trim()) : Boolean(diff?.stdout?.trim());
+   const hasStaged = typeof diff === 'string' ? Boolean(diff.trim()) : Boolean(diff?.stdout?.trim());
+
+   let aheadCount = 0;
+   try {
+    const revCount = await git(['rev-list', '--count', `origin/${branch}..HEAD`], cwd);
+    aheadCount = parseInt(typeof revCount === 'string' ? revCount.trim() : revCount?.stdout?.trim() || '0', 10);
+   } catch {
+    aheadCount = 0;
+   }
+
+   const hasFixes = hasStaged || aheadCount > 0;
    if (hasFixes) {
-    // Keep 1 commit per MR via amend if a commit already exists
-    let commitCount = 0;
-    try {
-     const revCount = await git(['rev-list', '--count', `origin/${defaultBranch}..HEAD`], cwd);
-     commitCount = parseInt(typeof revCount === 'string' ? revCount.trim() : revCount?.stdout?.trim() || '0', 10);
-    } catch {
-     commitCount = 0;
+    if (hasStaged) {
+     // Keep 1 commit per MR via amend if a commit already exists
+     let commitCount = 0;
+     try {
+      const revCount = await git(['rev-list', '--count', `origin/${defaultBranch}..HEAD`], cwd);
+      commitCount = parseInt(typeof revCount === 'string' ? revCount.trim() : revCount?.stdout?.trim() || '0', 10);
+     } catch {
+      commitCount = 0;
+     }
+     if (commitCount > 0) {
+      await git(['commit', '--amend', '--no-edit'], cwd);
+     } else {
+      await git(['commit', '-m', `fix(ci): address ${jobName} failure (round ${rounds})`], cwd);
+     }
     }
-    if (commitCount > 0) {
-     await git(['commit', '--amend', '--no-edit'], cwd);
-    } else {
-     await git(['commit', '-m', `fix(ci): address ${failed?.name || 'pipeline'} failure (round ${rounds})`], cwd);
-    }
+    const previousPipelineId = pipeline?.id;
     await git(['push', '-f', 'origin', `${branch}:${branch}`], cwd);
     await new Promise(r => setTimeout(r, Math.min(pollIntervalMs, 2000)));
+
+    const repushShaRes = await git(['rev-parse', 'HEAD'], cwd).catch(() => '');
+    const repushSha = (typeof repushShaRes === 'string' ? repushShaRes : repushShaRes?.stdout || '').trim();
+
+    const repushStart = Date.now();
+    const isRepushMatching = (p: UnifiedPipeline | null): boolean => {
+     if (!p) return false;
+     if (previousPipelineId && p.id === previousPipelineId) return false;
+     if (repushSha && p.sha && p.sha !== repushSha) return false;
+     return true;
+    };
+
     pipeline = await platform.getLatestPipeline(branch);
+    if (!isRepushMatching(pipeline)) {
+     pipeline = null;
+    }
+    while (!pipeline && (Date.now() - repushStart < discoveryTimeout)) {
+     await new Promise(r => setTimeout(r, discoveryInterval));
+     const candidate = await platform.getLatestPipeline(branch);
+     if (isRepushMatching(candidate)) {
+      pipeline = candidate;
+     }
+    }
    } else {
-    throw new Error(`${ciOrActions} failed on job ${failed?.name || 'unknown'}, but no code changes were made to fix it`);
+    const errorDetails = rawTrace ? `:\n${extractMeaningfulErrorTrace(rawTrace, 1000)}` : '';
+    throw new Error(`${ciOrActions} failed on job "${jobName}", but no code changes were made to fix it${errorDetails}`);
    }
   } else {
    break;
   }
  }
 
- const finalStatus = pipeline?.status || 'success';
+ const finalStatus = pipeline?.status || 'failed';
  await call('mr', {
   mrIid: mr.iid,
   webUrl: mr.web_url,

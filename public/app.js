@@ -119,7 +119,7 @@ async function api(path,body,method,requestId){
   if (body !== undefined) headers['content-type'] = 'application/json';
  }
  const response=await fetch(path,{method:reqMethod,headers,body:body===undefined?undefined:JSON.stringify(body)});
- const data=await response.json();if(response.status===401){localStorage.removeItem('specboard.apiKey');key='';updateConnectButton(false);throw new Error('连接已失效，请重新连接');}if(!response.ok)throw new Error(data.error?.message||data.error||'请求失败');
+ const data=await response.json();if(response.status===401){localStorage.removeItem('specboard.apiKey');key='';updateConnectButton(false);throw new Error('连接已失效，请重新连接');}if(!response.ok){const error=new Error(data.error?.message||data.error||'请求失败');error.code=data.error?.code;error.status=response.status;throw error;}
  return Array.isArray(data.items)&&!('hasMore' in data)?data.items:data;
 }
 function closeDialog(button){button.closest('dialog').close();}
@@ -866,7 +866,45 @@ $('#relay-form').onsubmit=async event=>{
  }catch(error){markFormInvalid(form,error.message);}finally{setButtonLoading(button,false);}
 };
 
-let clarificationSignature='',draftTimer;
+let clarificationSignature='',clarificationFormCleanup=null;
+function buildClarificationForm(item,onSubmitted){
+ const form=el('form'),inputs=new Map();let version=item.draft_version||0,saveQueue=Promise.resolve(),submitId=uuid(),draftTimer;
+ for(const q of item.questions){
+  const field=el('fieldset',undefined,'question-field'),legend=el('legend',q.prompt+(q.required?' *':''));
+  field.append(legend,el('p',q.reason,'question-reason'));
+  const controls=[];
+  if(q.options)for(const option of q.options){
+   const label=el('label',undefined,'answer-option'),input=el('input');
+   input.type=q.type==='multiple_choice'?'checkbox':'radio';input.name=q.id;input.value=option.id;
+   input.checked=item.draft_answers?.[q.id]?.optionIds?.includes(option.id)||false;
+   label.append(input,el('span',option.label+(q.recommendedOptionIds?.includes(option.id)?' · 推荐':'')));
+   if(option.description)label.append(el('small',option.description));
+   controls.push(input);field.append(label);
+  }
+  if(q.type==='confirmation')for(const [value,title]of [['true','同意方案'],['false','需要调整']]){
+   const label=el('label',undefined,'answer-option'),input=el('input');
+   input.type='radio';input.name=q.id;input.value=value;
+   input.checked=String(item.draft_answers?.[q.id]?.confirmed)===value;
+   label.append(input,el('span',title));controls.push(input);field.append(label);
+  }
+  const label=el('label',q.type==='text'?'你的回答':'其他方案或说明'),text=el('textarea');
+  text.rows=2;text.maxLength=10000;text.value=item.draft_answers?.[q.id]?.text||'';
+  label.append(text);field.append(label);inputs.set(q.id,{q,controls,text});form.append(field);
+ }
+ const label=el('label','额外补充'),extra=el('textarea');extra.rows=2;extra.maxLength=20000;extra.value=item.draft_context||'';
+ label.append(extra);
+ const status=el('span',undefined,'draft-status-pill');status.setAttribute('role','status');
+ status.append(el('span',undefined,'status-dot'),document.createTextNode(''));
+ const actions=el('div',undefined,'actions'),button=el('button','提交并继续','primary');
+ actions.append(button);form.append(label,status,actions);
+ const payload=()=>{const answers={};for(const [id,{q,controls,text}]of inputs){const answer={text:text.value};if(q.options)answer.optionIds=controls.filter(c=>c.checked).map(c=>c.value);if(q.type==='confirmation'){const checked=controls.find(c=>c.checked);if(checked)answer.confirmed=checked.value==='true';}answers[id]=answer;}return {revision:item.revision,answers,additionalContext:extra.value};};
+ const save=()=>{const data={...payload(),draftVersion:version};saveQueue=saveQueue.catch(()=>{}).then(async()=>{data.draftVersion=version;const result=await api('/api/v1/clarifications/'+item.id+'/draft',data,'PUT');version=result.version;status.className='draft-status-pill saved';status.replaceChildren(el('span',undefined,'status-dot'),document.createTextNode('草稿已保存'));});saveQueue.catch(error=>{status.className='draft-status-pill';status.textContent=error.message;});};
+ const valid=()=>{const {answers}=payload();return item.questions.every(q=>!q.required||(q.type==='confirmation'?typeof answers[q.id].confirmed==='boolean':q.type==='text'?!!answers[q.id].text.trim():!!answers[q.id].optionIds?.length||!!answers[q.id].text.trim()));};
+ button.disabled=!valid();
+ form.oninput=()=>{button.disabled=!valid();submitId=uuid();status.className='draft-status-pill';status.replaceChildren(el('span',undefined,'status-dot'),document.createTextNode('编辑中…'));clearTimeout(draftTimer);draftTimer=setTimeout(save,600);};
+ form.onsubmit=async event=>{event.preventDefault();clearTimeout(draftTimer);button.disabled=true;try{await saveQueue.catch(()=>{});await api('/api/v1/clarifications/'+item.id+'/answers',payload(),'POST',submitId);await onSubmitted?.();}catch(error){status.textContent=error.message;}finally{button.disabled=!valid();}};
+ return {form,cleanup:()=>clearTimeout(draftTimer)};
+}
 function renderClarifications(batches,task){
  const history=batches.filter(b=>b.stage===viewStage),batch=history.find(b=>b.status==='pending'),editable=viewStage===task.stage;
  const signature=task.id+':'+viewStage+':'+history.map(b=>b.id+':'+b.revision+':'+b.status).join(',');
@@ -879,24 +917,14 @@ function renderClarifications(batches,task){
   feedbackCard.hidden=!editable||history.some(b=>b.status==='submitted');
  }
  $('#clarification-status').textContent=batch?'等待你的回答':'';
- if(signature===clarificationSignature)return;clarificationSignature=signature;clearTimeout(draftTimer);
+ if(signature===clarificationSignature)return;
+ clarificationSignature=signature;
+ clarificationFormCleanup?.();clarificationFormCleanup=null;
  const root=$('#clarification-content');root.replaceChildren();
  if(!batch||!editable)return;
-
- const item=batch;
- const form=el('form'),inputs=new Map();let version=item.draft_version||0,saveQueue=Promise.resolve(),submitId=uuid();
- for(const q of item.questions){const field=el('fieldset',undefined,'question-field'),legend=el('legend',q.prompt+(q.required?' *':''));field.append(legend,el('p',q.reason,'question-reason'));const controls=[];
-  if(q.options)for(const option of q.options){const label=el('label',undefined,'answer-option'),input=el('input');input.type=q.type==='multiple_choice'?'checkbox':'radio';input.name=q.id;input.value=option.id;input.checked=item.draft_answers?.[q.id]?.optionIds?.includes(option.id)||false;label.append(input,el('span',option.label+(q.recommendedOptionIds?.includes(option.id)?' · 推荐':'')));if(option.description)label.append(el('small',option.description));controls.push(input);field.append(label);}
-  if(q.type==='confirmation')for(const [value,title]of [['true','同意方案'],['false','需要调整']]){const label=el('label',undefined,'answer-option'),input=el('input');input.type='radio';input.name=q.id;input.value=value;input.checked=String(item.draft_answers?.[q.id]?.confirmed)===value;label.append(input,el('span',title));controls.push(input);field.append(label);}
-  const label=el('label',q.type==='text'?'你的回答':'其他方案或说明'),text=el('textarea');text.rows=2;text.maxLength=10000;text.value=item.draft_answers?.[q.id]?.text||'';label.append(text);field.append(label);inputs.set(q.id,{q,controls,text});form.append(field);
- }
- const label=el('label','额外补充'),extra=el('textarea');extra.rows=2;extra.maxLength=20000;extra.value=item.draft_context||'';label.append(extra);const status=el('span',undefined,'draft-status-pill');status.setAttribute('role','status');status.append(el('span',undefined,'status-dot'),document.createTextNode(''));const actions=el('div',undefined,'actions'),button=el('button','提交并继续','primary');actions.append(button);form.append(label,status,actions);root.append(form);
- const payload=()=>{const answers={};for(const [id,{q,controls,text}]of inputs){const answer={text:text.value};if(q.options)answer.optionIds=controls.filter(c=>c.checked).map(c=>c.value);if(q.type==='confirmation'){const checked=controls.find(c=>c.checked);if(checked)answer.confirmed=checked.value==='true';}answers[id]=answer;}return {revision:item.revision,answers,additionalContext:extra.value};};
- const save=()=>{const data={...payload(),draftVersion:version};saveQueue=saveQueue.catch(()=>{}).then(async()=>{data.draftVersion=version;const result=await api('/api/v1/clarifications/'+item.id+'/draft',data,'PUT');version=result.version;status.className='draft-status-pill saved';status.replaceChildren(el('span',undefined,'status-dot'),document.createTextNode('草稿已保存'));});saveQueue.catch(error=>{status.className='draft-status-pill';status.textContent=error.message;});};
- const valid=()=>{const {answers}=payload();return item.questions.every(q=>!q.required||(q.type==='confirmation'?typeof answers[q.id].confirmed==='boolean':q.type==='text'?!!answers[q.id].text.trim():!!answers[q.id].optionIds?.length||!!answers[q.id].text.trim()));};
- button.disabled=!valid();
- form.oninput=()=>{button.disabled=!valid();submitId=uuid();status.className='draft-status-pill';status.replaceChildren(el('span',undefined,'status-dot'),document.createTextNode('编辑中…'));clearTimeout(draftTimer);draftTimer=setTimeout(save,600);};
- form.onsubmit=async event=>{event.preventDefault();clearTimeout(draftTimer);button.disabled=true;try{await saveQueue.catch(()=>{});await api('/api/v1/clarifications/'+item.id+'/answers',payload(),'POST',submitId);clarificationSignature='';await updateDetail();}catch(error){status.textContent=error.message;}finally{button.disabled=!valid();}};
+ const built=buildClarificationForm(batch,async()=>{clarificationSignature='';await updateDetail();});
+ clarificationFormCleanup=built.cleanup;
+ root.append(built.form);
 }
 
 function renderInlineCode(text) {
@@ -1170,6 +1198,105 @@ let activeChatId = null;
 let chatEventTimer = null;
 let chatEventSource = null;
 let chatMaxSequence = 0;
+let chatClarificationSignature = '';
+let chatClarificationFormCleanup = null;
+let activeChatClarification = null;
+let chatComposerLocked = false;
+
+function setChatComposerLocked(locked, message) {
+ const input = $('#chat-input');
+ const button = $('#chat-send-btn');
+ const box = $('.chat-composer-box');
+ if (!input || !button) {
+  chatComposerLocked = locked;
+  return;
+ }
+ if (!input.dataset.normalPlaceholder) input.dataset.normalPlaceholder = input.placeholder;
+ if (locked) {
+  chatComposerLocked = true;
+  input.disabled = true;
+  input.placeholder = message || '请先完成澄清确认…';
+  button.disabled = true;
+  box?.classList.add('is-locked');
+  return;
+ }
+ const wasLocked = chatComposerLocked;
+ chatComposerLocked = false;
+ input.disabled = false;
+ input.placeholder = input.dataset.normalPlaceholder || input.placeholder;
+ if (wasLocked) button.disabled = false;
+ box?.classList.remove('is-locked');
+}
+
+function focusChatClarification() {
+ const card = $('#chat-clarification-card');
+ if (!card || card.hidden) return;
+ card.classList.remove('is-attention');
+ void card.offsetWidth;
+ card.classList.add('is-attention');
+ card.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+ const target = card.querySelector('textarea') || card.querySelector('input') || card.querySelector('button.primary');
+ target?.focus({preventScroll: true});
+}
+
+function resetChatClarification() {
+ chatClarificationFormCleanup?.();
+ chatClarificationFormCleanup = null;
+ chatClarificationSignature = '';
+ activeChatClarification = null;
+ const card = $('#chat-clarification-card');
+ if (card) card.hidden = true;
+ const root = $('#chat-clarification-content');
+ if (root) root.replaceChildren();
+ const status = $('#chat-clarification-status');
+ if (status) status.textContent = '';
+ setChatComposerLocked(false);
+}
+
+function renderChatClarification(batches, chat) {
+ const card = $('#chat-clarification-card');
+ const root = $('#chat-clarification-content');
+ const status = $('#chat-clarification-status');
+ if (!card || !root) return 'none';
+ const list = Array.isArray(batches) ? batches : (batches?.items || []);
+ const relevant = list.filter(b => b.stage === chat.stage && ['pending', 'submitted'].includes(b.status));
+ const batch = relevant.length ? relevant[relevant.length - 1] : null;
+ activeChatClarification = batch;
+
+ if (batch?.status === 'pending') {
+  setChatComposerLocked(true, '请先回答上方的澄清问题，提交后会自动继续…');
+ } else if (batch?.status === 'submitted') {
+  setChatComposerLocked(true, '澄清答案已提交，正在继续执行…');
+ } else {
+  setChatComposerLocked(false);
+ }
+
+ const signature = `${chat.id}:${chat.stage}:${batch ? `${batch.id}:${batch.revision}:${batch.status}` : 'none'}`;
+ if (signature === chatClarificationSignature) return signature;
+ chatClarificationSignature = signature;
+ chatClarificationFormCleanup?.();
+ chatClarificationFormCleanup = null;
+ root.replaceChildren();
+ card.hidden = !batch;
+ if (status) status.textContent = '';
+ if (!batch) return signature;
+
+ if (status) status.textContent = batch.status === 'pending' ? '等待你的回答' : '已提交，继续执行中';
+ if (batch.status === 'submitted') {
+  root.append(el('p', '澄清答案已提交，系统已启动新的执行轮次，完成后会在这里继续。', 'chat-clarification-note'));
+  return signature;
+ }
+
+ const built = buildClarificationForm(batch, async () => {
+  chatClarificationSignature = '';
+  setChatComposerLocked(true, '澄清答案已提交，正在继续执行…');
+  await refreshActiveChat(true).catch(error => notice(error.message || '会话刷新失败'));
+ });
+ chatClarificationFormCleanup = built.cleanup;
+ root.append(built.form);
+ requestAnimationFrame(() => card.scrollIntoView({block: 'nearest', behavior: 'smooth'}));
+ return signature;
+}
 
 function switchMode(mode) {
  currentMode = mode;
@@ -1503,6 +1630,7 @@ async function selectChat(chatId) {
  localStorage.setItem('specboard.activeChatId', chatId);
  lastRenderedDigest = '';
  stopChatStream();
+ resetChatClarification();
  renderChatList();
  const header = $('#chat-header');
  const emptyState = $('#chat-empty-state');
@@ -1535,6 +1663,7 @@ function resetNewChat() {
  localStorage.removeItem('specboard.activeChatId');
  lastRenderedDigest = '';
  stopChatStream();
+ resetChatClarification();
  if (chatEventTimer) {
   clearInterval(chatEventTimer);
   chatEventTimer = null;
@@ -1581,10 +1710,12 @@ function resetNewChat() {
 async function refreshActiveChat(forceScroll = false) {
  if (!activeChatId || currentMode !== 'chat') return;
  try {
-  const [chat, eventsRes] = await Promise.all([
+  const [chat, eventsRes, clarificationsRes] = await Promise.all([
    api(`/api/v1/chats/${activeChatId}`),
-   api(`/api/v1/tasks/${activeChatId}/events`)
+   api(`/api/v1/tasks/${activeChatId}/events`),
+   api(`/api/v1/tasks/${activeChatId}/clarifications`)
   ]);
+  if (activeChatId !== chat.id) return;
 
   const projChip = $('#chat-project-chip');
   if (projChip) {
@@ -1616,9 +1747,12 @@ async function refreshActiveChat(forceScroll = false) {
   const maxSeqInList = eventsList.reduce((max, ev) => Math.max(max, ev.sequence || 0), 0);
   chatMaxSequence = Math.max(chatMaxSequence, maxSeqInList);
 
+  const clarificationsList = Array.isArray(clarificationsRes) ? clarificationsRes : (clarificationsRes?.items || []);
+  const clarificationDigest = renderChatClarification(clarificationsList, chat);
+
   const lastEvent = eventsList[eventsList.length - 1];
   const lastEventKey = lastEvent ? `${lastEvent.sequence}_${lastEvent.type}_${JSON.stringify(lastEvent.payload).length}` : 'none';
-  const currentDigest = `${chat.id}_${chat.status}_${chat.updated_at}_${eventsList.length}_${lastEventKey}`;
+  const currentDigest = `${chat.id}_${chat.status}_${chat.updated_at}_${eventsList.length}_${lastEventKey}_${clarificationDigest}`;
 
   const scrollBox = $('#chat-scroll-container');
   const isAtBottom = scrollBox ? (scrollBox.scrollHeight - scrollBox.scrollTop - scrollBox.clientHeight < 80) : true;
@@ -1916,6 +2050,11 @@ const handleChatSubmit = async (e) => {
  const input = $('#chat-input');
  const msg = input?.value?.trim();
  if (!msg) return;
+ if (activeChatClarification?.status === 'pending') {
+  notice('请先回答上方的澄清问题，提交后会自动继续。');
+  focusChatClarification();
+  return;
+ }
  const btn = $('#chat-send-btn');
  setButtonLoading(btn, true, '…');
 
@@ -1934,9 +2073,16 @@ const handleChatSubmit = async (e) => {
    await refreshActiveChat(true);
   }
  } catch (err) {
-  notice(err.message || '发送失败');
+  if (err?.code === 'clarification_required') {
+   notice('请先回答上方的澄清问题，提交后会自动继续。');
+   await refreshActiveChat(true).catch(() => {});
+   focusChatClarification();
+  } else {
+   notice(err.message || '发送失败');
+  }
  } finally {
   setButtonLoading(btn, false);
+  if (chatComposerLocked) btn.disabled = true;
  }
 };
 

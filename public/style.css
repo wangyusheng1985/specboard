@@ -442,12 +442,32 @@ dialog.artifact-preview-dialog::backdrop{background:#0f172a88;backdrop-filter:bl
 .thinking-bubble{color:var(--muted);display:flex;align-items:center;gap:8px;font-style:italic}
 .thinking-spinner{width:13px;height:13px;border:2px solid #cbd5e1;border-top-color:var(--accent);border-radius:50%;animation:icon-spin .6s linear infinite;display:inline-block;flex:none}
 
+/* Chat Inline Clarification */
+.chat-clarification-card{margin:0 20px 20px;max-width:calc(100% - 40px);box-shadow:0 4px 16px rgba(217,119,6,.1)}
+.chat-clarification-card .banner-body{padding-top:2px}
+.chat-clarification-card .question-field{background:rgba(255,255,255,.72);border-color:#fde68a;margin:0 0 12px;padding:12px 14px}
+.chat-clarification-card .question-field legend{font-size:13px}
+.chat-clarification-card .question-reason{font-size:12px;color:#92400e;opacity:.85}
+.chat-clarification-card .answer-option{background:rgba(255,255,255,.82);padding:9px 11px;margin-bottom:6px}
+.chat-clarification-card .answer-option:has(input:checked){background:#fff7ed;border-color:#f59e0b}
+.chat-clarification-card label{font-weight:600;margin:10px 0;font-size:12.5px}
+.chat-clarification-card textarea{background:#fff;font-size:13px;margin-top:4px}
+.chat-clarification-card .actions{margin-top:10px;padding:4px 0 2px}
+.chat-clarification-card .draft-status-pill{margin-right:auto}
+.chat-clarification-note{margin:0;font-size:12.5px;color:#92400e}
+.chat-clarification-card.is-attention{animation:chat-clarification-attention .9s ease 2}
+@keyframes chat-clarification-attention{0%,100%{box-shadow:0 1px 3px rgba(15,23,42,.04)}50%{box-shadow:0 0 0 4px rgba(245,158,11,.28)}}
+.chat-composer-box.is-locked{background:var(--surface-2);border-color:#e2e8f0;box-shadow:none;opacity:.85}
+.chat-composer-box.is-locked:focus-within{border-color:#e2e8f0;box-shadow:none}
+.chat-composer-box.is-locked textarea{cursor:not-allowed}
+
 
 @media(max-width:768px){
  .mode-chat-view{flex-direction:column;height:calc(100dvh - 80px);padding:0}
  .chat-sidebar{width:100%;min-width:100%;max-width:100%;height:140px;border-radius:0}
  .chat-viewport{border-radius:0;border-left:0;border-right:0}
  .chat-quick-prompts-grid{grid-template-columns:1fr}
+ .chat-clarification-card{margin:0 12px 16px;max-width:calc(100% - 24px)}
  .chat-composer-hint{display:none}
 }
 

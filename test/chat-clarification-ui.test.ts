@@ -14,7 +14,7 @@ test('chat mode exposes pending clarifications and locks the composer', async ()
  assert.match(html, /id="chat-clarification-content"/);
  assert.match(html, /id="chat-clarification-status"/);
 
- assert.match(app, /\/api\/v1\/tasks\/\$\{activeChatId\}\/clarifications/);
+ assert.match(app, /\/api\/v1\/tasks\/\$\{chatId\}\/clarifications/);
  assert.match(app, /function renderChatClarification/);
  assert.match(app, /function buildClarificationForm/);
  assert.match(app, /activeChatClarification\?\.status === 'pending'/);

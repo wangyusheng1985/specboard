@@ -5,6 +5,7 @@ import {DetailRefreshState} from './detail-refresh-state.js';
 import {filterVisibleDiagnostics, normalizeStructuredDiagnosis} from './diagnostic-presentation.js';
 import {truncateToolOutput} from './tool-output.js';
 import {mergeChatEvents} from './chat-history.js';
+import {chatRoutePath, parseChatRoute} from './chat-route.js';
 const stages=['Explore','Propose','Apply','MR','Archive'];
 const uuid=()=>crypto.randomUUID?.()||([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c=>(c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16));
 const statuses={claimed:'等待执行',awaiting_answers:'等待回答',queued:'等待执行',running:'执行中',waiting_input:'等待补充',paused:'已暂停',failed:'执行失败',completed:'已完成',stopped:'已停止',interrupted:'执行中断'};
@@ -1205,6 +1206,11 @@ let chatHistoryHasMore = false;
 let chatHistoryLoading = false;
 let chatHistoryUserInteracted = false;
 let activeChatTask = null;
+let chatSelectionGeneration = 0;
+let chatSelectionPending = false;
+let appModeInitialized = false;
+let routeInitialized = false;
+let routeApplying = false;
 let chatClarificationSignature = '';
 let chatClarificationFormCleanup = null;
 let activeChatClarification = null;
@@ -1233,6 +1239,14 @@ function setChatComposerLocked(locked, message) {
  input.placeholder = input.dataset.normalPlaceholder || input.placeholder;
  if (wasLocked) button.disabled = false;
  box?.classList.remove('is-locked');
+}
+
+function scrollChatToBottom() {
+ const box = $('#chat-scroll-container');
+ if (!box) return;
+ const apply = () => { box.scrollTop = box.scrollHeight; };
+ apply();
+ requestAnimationFrame(apply);
 }
 
 function focusChatClarification() {
@@ -1392,9 +1406,63 @@ function renderChatClarification(batches, chat) {
  return signature;
 }
 
-function switchMode(mode) {
+function setRoute(path, {replace = false} = {}) {
+ const hash = `#${path}`;
+ if (location.hash === hash) {
+  routeInitialized = true;
+  return;
+ }
+ if (replace || !routeInitialized) history.replaceState(null, '', hash);
+ else location.hash = hash;
+ routeInitialized = true;
+}
+
+function parseRoute() {
+ return parseChatRoute(location.hash);
+}
+
+async function applyRoute() {
+ if (routeApplying) return;
+ routeApplying = true;
+ try {
+  const route = parseRoute();
+  if (!route) {
+   if (currentMode === 'chat') {
+    if (!appModeInitialized) await switchMode('chat');
+    else setRoute(activeChatId ? chatRoutePath(activeChatId) : '/chat', {replace: true});
+   } else if (!appModeInitialized) {
+    await switchMode('work');
+   } else {
+    setRoute('/work', {replace: true});
+   }
+   return;
+  }
+  if (route.mode === 'work') {
+   if (!appModeInitialized || currentMode !== 'work') await switchMode('work');
+   else setRoute('/work', {replace: true});
+   return;
+  }
+  if (!appModeInitialized || currentMode !== 'chat') {
+   await switchMode('chat', {chatId: route.chatId});
+  } else if (route.chatId) {
+   if (activeChatId !== route.chatId) await selectChat(route.chatId);
+  } else if (activeChatId) {
+   resetNewChat();
+  }
+ } finally {
+  routeApplying = false;
+ }
+}
+
+async function switchMode(mode, {chatId} = {}) {
+ const wasChat = currentMode === 'chat' && appModeInitialized;
+ if (mode === 'chat' && wasChat && chatId === undefined) {
+  setRoute(activeChatId ? chatRoutePath(activeChatId) : '/chat');
+  return;
+ }
  currentMode = mode;
  localStorage.setItem('specboard.currentMode', mode);
+ appModeInitialized = true;
  const workBtn = $('#mode-btn-work');
  const chatBtn = $('#mode-btn-chat');
  const workView = $('#work-view');
@@ -1407,7 +1475,7 @@ function switchMode(mode) {
   chatBtn?.setAttribute('aria-checked', 'true');
   if (workView) workView.hidden = true;
   if (chatView) chatView.hidden = false;
-  initChatMode();
+  await initChatMode(chatId);
  } else {
   chatBtn?.classList.remove('active');
   chatBtn?.setAttribute('aria-checked', 'false');
@@ -1415,16 +1483,20 @@ function switchMode(mode) {
   workBtn?.setAttribute('aria-checked', 'true');
   if (chatView) chatView.hidden = true;
   if (workView) workView.hidden = false;
+  chatSelectionGeneration += 1;
+  chatSelectionPending = false;
   if (chatEventTimer) {
    clearInterval(chatEventTimer);
    chatEventTimer = null;
   }
+  setRoute('/work');
   refresh();
  }
 }
 
-$('#mode-btn-work')?.addEventListener('click', () => switchMode('work'));
-$('#mode-btn-chat')?.addEventListener('click', () => switchMode('chat'));
+$('#mode-btn-work')?.addEventListener('click', () => void switchMode('work'));
+$('#mode-btn-chat')?.addEventListener('click', () => void switchMode('chat'));
+window.addEventListener('hashchange', () => { void applyRoute(); });
 
 // ---------------------------------------------------------------------------
 // Vector SVG Icons System Helper
@@ -1717,14 +1789,19 @@ function handleLiveStreamEvent(ev, chatId) {
   }).catch(() => {});
  }
 
- if (scrollBox && isAtBottom) {
-  scrollBox.scrollTop = scrollBox.scrollHeight;
- }
+ if (scrollBox && isAtBottom) scrollChatToBottom();
 }
 
 async function selectChat(chatId) {
+ const generation = ++chatSelectionGeneration;
+ chatSelectionPending = true;
+ if (chatEventTimer) {
+  clearInterval(chatEventTimer);
+  chatEventTimer = null;
+ }
  activeChatId = chatId;
  localStorage.setItem('specboard.activeChatId', chatId);
+ setRoute(chatRoutePath(chatId));
  lastRenderedDigest = '';
  stopChatStream();
  resetChatClarification();
@@ -1751,14 +1828,23 @@ async function selectChat(chatId) {
   activeTag.style.display = 'inline-block';
  }
 
- await refreshActiveChat(true);
- if (chatEventTimer) clearInterval(chatEventTimer);
- chatEventTimer = setInterval(() => refreshActiveChat(false), 3000);
+ try {
+  await refreshActiveChat(true);
+  if (generation === chatSelectionGeneration) {
+   scrollChatToBottom();
+   chatEventTimer = setInterval(() => refreshActiveChat(false), 3000);
+  }
+ } finally {
+  if (generation === chatSelectionGeneration) chatSelectionPending = false;
+ }
 }
 
 function resetNewChat() {
+ chatSelectionGeneration += 1;
+ chatSelectionPending = false;
  activeChatId = null;
  localStorage.removeItem('specboard.activeChatId');
+ setRoute('/chat');
  lastRenderedDigest = '';
  stopChatStream();
  resetChatClarification();
@@ -1808,16 +1894,19 @@ function resetNewChat() {
 
 async function refreshActiveChat(forceScroll = false) {
  if (!activeChatId || currentMode !== 'chat') return;
+ if (chatSelectionPending && !forceScroll) return;
+ const chatId = activeChatId;
+ const generation = chatSelectionGeneration;
  try {
   const eventsPath = chatLoadedEvents.length > 0
-   ? `/api/v1/tasks/${activeChatId}/events?after=${chatMaxSequence}&limit=500`
-   : `/api/v1/tasks/${activeChatId}/events?limit=200`;
+   ? `/api/v1/tasks/${chatId}/events?after=${chatMaxSequence}&limit=500`
+   : `/api/v1/tasks/${chatId}/events?limit=200`;
   const [chat, eventsRes, clarificationsRes] = await Promise.all([
-   api(`/api/v1/chats/${activeChatId}`),
+   api(`/api/v1/chats/${chatId}`),
    api(eventsPath),
-   api(`/api/v1/tasks/${activeChatId}/clarifications`)
+   api(`/api/v1/tasks/${chatId}/clarifications`)
   ]);
-  if (activeChatId !== chat.id) return;
+  if (activeChatId !== chatId || chat.id !== chatId || generation !== chatSelectionGeneration) return;
 
   const projChip = $('#chat-project-chip');
   if (projChip) {
@@ -1881,7 +1970,7 @@ async function refreshActiveChat(forceScroll = false) {
   }
 
   if (scrollBox) {
-   if (forceScroll || isAtBottom) scrollBox.scrollTop = scrollBox.scrollHeight;
+   if (forceScroll || isAtBottom) scrollChatToBottom();
    else scrollBox.scrollTop = previousScrollTop;
   }
  } catch (err) {}
@@ -2141,9 +2230,14 @@ function renderChatMessages(events, chat) {
  container.append(...renderedNodes);
 }
 
-async function initChatMode() {
+async function initChatMode(targetChatId) {
  await loadChatProjects();
  await loadChatList();
+ if (targetChatId !== undefined) {
+  if (targetChatId) await selectChat(targetChatId);
+  else resetNewChat();
+  return;
+ }
  const savedId = localStorage.getItem('specboard.activeChatId');
  if (savedId && chatConversations.some(c => c.id === savedId)) {
   await selectChat(savedId);
@@ -2237,7 +2331,5 @@ $('#chat-delete-btn')?.addEventListener('click', async () => {
  }
 });
 
-if (currentMode === 'chat') {
- switchMode('chat');
-}
+void applyRoute();
 

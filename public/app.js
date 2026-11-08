@@ -4,6 +4,7 @@ import {markdown} from './markdown.js';
 import {DetailRefreshState} from './detail-refresh-state.js';
 import {filterVisibleDiagnostics, normalizeStructuredDiagnosis} from './diagnostic-presentation.js';
 import {truncateToolOutput} from './tool-output.js';
+import {mergeChatEvents} from './chat-history.js';
 const stages=['Explore','Propose','Apply','MR','Archive'];
 const uuid=()=>crypto.randomUUID?.()||([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c=>(c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16));
 const statuses={claimed:'等待执行',awaiting_answers:'等待回答',queued:'等待执行',running:'执行中',waiting_input:'等待补充',paused:'已暂停',failed:'执行失败',completed:'已完成',stopped:'已停止',interrupted:'执行中断'};
@@ -1199,6 +1200,11 @@ let activeChatId = null;
 let chatEventTimer = null;
 let chatEventSource = null;
 let chatMaxSequence = 0;
+let chatLoadedEvents = [];
+let chatHistoryHasMore = false;
+let chatHistoryLoading = false;
+let chatHistoryUserInteracted = false;
+let activeChatTask = null;
 let chatClarificationSignature = '';
 let chatClarificationFormCleanup = null;
 let activeChatClarification = null;
@@ -1252,6 +1258,93 @@ function resetChatClarification() {
  const status = $('#chat-clarification-status');
  if (status) status.textContent = '';
  setChatComposerLocked(false);
+}
+
+function renderChatHistoryBar() {
+ const active = Boolean(activeChatId) && currentMode === 'chat';
+ const visible = active && (chatHistoryHasMore || chatHistoryLoading);
+ const bar = $('#chat-history-bar');
+ const load = $('#chat-history-load');
+ const status = $('#chat-history-status');
+ const header = $('#chat-history-btn');
+ if (bar) bar.hidden = !visible;
+ if (header) {
+  header.hidden = !visible;
+  header.disabled = chatHistoryLoading;
+  header.title = chatHistoryLoading ? '正在加载历史…' : '查看更早的消息';
+ }
+ if (load) {
+  load.disabled = chatHistoryLoading;
+  load.textContent = chatHistoryLoading ? '正在加载历史…' : '查看更早的消息';
+ }
+ if (status) status.textContent = chatHistoryLoading ? '请稍候…' : '';
+}
+
+function resetChatHistory() {
+ chatLoadedEvents = [];
+ chatMaxSequence = 0;
+ chatHistoryHasMore = false;
+ chatHistoryLoading = false;
+ chatHistoryUserInteracted = false;
+ activeChatTask = null;
+ renderChatHistoryBar();
+}
+
+async function loadChatHistory({jumpToTop = false} = {}) {
+ if (!activeChatId || chatHistoryLoading || !chatHistoryHasMore) return;
+ const chatId = activeChatId;
+ const before = chatLoadedEvents[0]?.sequence;
+ if (!before) return;
+ chatHistoryLoading = true;
+ renderChatHistoryBar();
+ const scrollBox = $('#chat-scroll-container');
+ try {
+  const response = await api(`/api/v1/tasks/${chatId}/events?before=${before}&limit=200`);
+  if (activeChatId !== chatId) return;
+  const page = Array.isArray(response) ? {items: response, hasMore: false} : (response || {});
+  chatLoadedEvents = mergeChatEvents(chatLoadedEvents, page.items || []);
+  chatHistoryHasMore = Boolean(page.hasMore);
+  lastRenderedDigest = '';
+  const previousTop = scrollBox?.scrollTop || 0;
+  const previousHeight = scrollBox?.scrollHeight || 0;
+  renderChatMessages(chatLoadedEvents, activeChatTask || {});
+  if (scrollBox) {
+   if (jumpToTop) scrollBox.scrollTop = 0;
+   else scrollBox.scrollTop = previousTop + Math.max(0, scrollBox.scrollHeight - previousHeight);
+  }
+ } catch (error) {
+  notice(error.message || '加载历史失败');
+ } finally {
+  if (activeChatId === chatId) {
+   chatHistoryLoading = false;
+   renderChatHistoryBar();
+  }
+ }
+}
+
+function bindChatHistoryInteractions() {
+ const scrollBox = $('#chat-scroll-container');
+ $('#chat-history-load')?.addEventListener('click', () => {
+  chatHistoryUserInteracted = true;
+  void loadChatHistory({jumpToTop: true});
+ });
+ $('#chat-history-btn')?.addEventListener('click', () => {
+  chatHistoryUserInteracted = true;
+  void loadChatHistory({jumpToTop: true});
+ });
+ if (!scrollBox) return;
+ const armOnly = () => { chatHistoryUserInteracted = true; };
+ const armAndLoad = () => {
+  chatHistoryUserInteracted = true;
+  if (scrollBox.scrollTop <= 80) void loadChatHistory();
+ };
+ scrollBox.addEventListener('wheel', armAndLoad, {passive: true});
+ scrollBox.addEventListener('touchmove', armAndLoad, {passive: true});
+ scrollBox.addEventListener('pointerdown', armOnly);
+ scrollBox.addEventListener('scroll', () => {
+  if (!chatHistoryUserInteracted) return;
+  if (scrollBox.scrollTop <= 80) void loadChatHistory();
+ }, {passive: true});
 }
 
 function renderChatClarification(batches, chat) {
@@ -1448,9 +1541,10 @@ function startChatStream(chatId, startSeq) {
   }
   try {
    const ev = JSON.parse(e.data);
-   if (ev && typeof ev.sequence === 'number') {
-    chatMaxSequence = Math.max(chatMaxSequence, ev.sequence);
-    handleLiveStreamEvent(ev, chatId);
+   const sequence = Number(ev?.sequence);
+   if (ev && Number.isFinite(sequence)) {
+    chatMaxSequence = Math.max(chatMaxSequence, sequence);
+    handleLiveStreamEvent({...ev, sequence}, chatId);
    }
   } catch (err) {}
  };
@@ -1491,6 +1585,8 @@ function createThinkingCard(thinkingText, isThinking = false) {
 function handleLiveStreamEvent(ev, chatId) {
  const container = $('#chat-messages');
  if (!container || activeChatId !== chatId) return;
+ const sequence = Number(ev.sequence);
+ if (Number.isFinite(sequence)) chatLoadedEvents = mergeChatEvents(chatLoadedEvents, [{...ev, sequence}]);
 
  const scrollBox = $('#chat-scroll-container');
  const isAtBottom = scrollBox ? (scrollBox.scrollHeight - scrollBox.scrollTop - scrollBox.clientHeight < 120) : true;
@@ -1632,6 +1728,7 @@ async function selectChat(chatId) {
  lastRenderedDigest = '';
  stopChatStream();
  resetChatClarification();
+ resetChatHistory();
  renderChatList();
  const header = $('#chat-header');
  const emptyState = $('#chat-empty-state');
@@ -1665,6 +1762,7 @@ function resetNewChat() {
  lastRenderedDigest = '';
  stopChatStream();
  resetChatClarification();
+ resetChatHistory();
  if (chatEventTimer) {
   clearInterval(chatEventTimer);
   chatEventTimer = null;
@@ -1711,9 +1809,12 @@ function resetNewChat() {
 async function refreshActiveChat(forceScroll = false) {
  if (!activeChatId || currentMode !== 'chat') return;
  try {
+  const eventsPath = chatLoadedEvents.length > 0
+   ? `/api/v1/tasks/${activeChatId}/events?after=${chatMaxSequence}&limit=500`
+   : `/api/v1/tasks/${activeChatId}/events?limit=200`;
   const [chat, eventsRes, clarificationsRes] = await Promise.all([
    api(`/api/v1/chats/${activeChatId}`),
-   api(`/api/v1/tasks/${activeChatId}/events`),
+   api(eventsPath),
    api(`/api/v1/tasks/${activeChatId}/clarifications`)
   ]);
   if (activeChatId !== chat.id) return;
@@ -1744,26 +1845,33 @@ async function refreshActiveChat(forceScroll = false) {
    }
   }
 
-  const eventsList = Array.isArray(eventsRes) ? eventsRes : (eventsRes?.items || eventsRes?.events || []);
-  const maxSeqInList = eventsList.reduce((max, ev) => Math.max(max, ev.sequence || 0), 0);
+  const eventPage = Array.isArray(eventsRes) ? {items: eventsRes, hasMore: false} : (eventsRes || {});
+  const eventsList = eventPage.items || eventPage.events || [];
+  const wasEmpty = chatLoadedEvents.length === 0;
+  chatLoadedEvents = mergeChatEvents(chatLoadedEvents, eventsList);
+  if (wasEmpty) chatHistoryHasMore = Boolean(eventPage.hasMore);
+  const maxSeqInList = eventsList.reduce((max, ev) => Math.max(max, Number(ev.sequence) || 0), 0);
   chatMaxSequence = Math.max(chatMaxSequence, maxSeqInList);
+  activeChatTask = chat;
+  renderChatHistoryBar();
 
   const clarificationsList = Array.isArray(clarificationsRes) ? clarificationsRes : (clarificationsRes?.items || []);
   const clarificationDigest = renderChatClarification(clarificationsList, chat);
 
-  const lastEvent = eventsList[eventsList.length - 1];
+  const lastEvent = chatLoadedEvents[chatLoadedEvents.length - 1];
   const lastEventKey = lastEvent ? `${lastEvent.sequence}_${lastEvent.type}_${JSON.stringify(lastEvent.payload).length}` : 'none';
-  const currentDigest = `${chat.id}_${chat.status}_${chat.updated_at}_${eventsList.length}_${lastEventKey}_${clarificationDigest}`;
+  const currentDigest = `${chat.id}_${chat.status}_${chat.updated_at}_${chatLoadedEvents.length}_${lastEventKey}_${clarificationDigest}_${chatHistoryHasMore ? 'more' : 'done'}`;
 
   const scrollBox = $('#chat-scroll-container');
   const isAtBottom = scrollBox ? (scrollBox.scrollHeight - scrollBox.scrollTop - scrollBox.clientHeight < 80) : true;
+  const previousScrollTop = scrollBox ? scrollBox.scrollTop : 0;
 
   if (currentDigest === lastRenderedDigest && !forceScroll) {
    return;
   }
   lastRenderedDigest = currentDigest;
 
-  renderChatMessages(eventsList, chat);
+  renderChatMessages(chatLoadedEvents, chat);
 
   const isWorking = ['running', 'queued', 'claimed'].includes(chat?.status);
   if (isWorking && !chatEventSource) {
@@ -1772,8 +1880,9 @@ async function refreshActiveChat(forceScroll = false) {
    stopChatStream();
   }
 
-  if (scrollBox && (forceScroll || isAtBottom)) {
-   scrollBox.scrollTop = scrollBox.scrollHeight;
+  if (scrollBox) {
+   if (forceScroll || isAtBottom) scrollBox.scrollTop = scrollBox.scrollHeight;
+   else scrollBox.scrollTop = previousScrollTop;
   }
  } catch (err) {}
 }
@@ -2112,6 +2221,8 @@ $('#chat-input')?.addEventListener('keydown', (e) => {
   handleChatSubmit(e);
  }
 });
+
+bindChatHistoryInteractions();
 
 $('#chat-delete-btn')?.addEventListener('click', async () => {
  if (!activeChatId) return;

@@ -194,14 +194,22 @@ export async function createRuntimeApi(options:{databaseUrl:string;secret:string
  route('GET','/api/v1/tasks/:id/runs',publicAuth,async(req:any)=>({items:(await pool.query('SELECT r.*,x.summary,x.validation,x.artifacts,x.blockers,x.error FROM agent_runs r LEFT JOIN runtime_results x ON x.run_id=r.id WHERE task_id=$1 ORDER BY created_at',[req.params.id])).rows}),{params});
  route('GET','/api/v1/tasks/:id/proposals',publicAuth,async(req:any)=>({items:(await pool.query('SELECT * FROM runtime_proposals WHERE task_id=$1 AND confirmed=false',[req.params.id])).rows}),{params});
  route('GET','/api/v1/tasks/:id/events',publicAuth,async(req:any)=>{
-  const after=Number(req.query.after||0);
+  const after=Number(req.query.after||0),before=Number(req.query.before||0),requested=Number(req.query.limit||500);
+  const limit=Number.isFinite(requested)?Math.min(Math.max(Math.trunc(requested),1),500):500;
   if(after>0){
-   return {items:(await pool.query('SELECT e.*,r.stage FROM runtime_events e LEFT JOIN agent_runs r ON r.id=e.run_id WHERE e.task_id=$1 AND e.sequence>$2 ORDER BY e.sequence LIMIT 500',[req.params.id,after])).rows};
+   return {items:(await pool.query('SELECT e.*,r.stage FROM runtime_events e LEFT JOIN agent_runs r ON r.id=e.run_id WHERE e.task_id=$1 AND e.sequence>$2 ORDER BY e.sequence LIMIT $3',[req.params.id,after,limit])).rows};
   }
-  // When fetching initial events without after, fetch the latest 500 in ascending order
-  const rows=(await pool.query('SELECT e.*,r.stage FROM runtime_events e LEFT JOIN agent_runs r ON r.id=e.run_id WHERE e.task_id=$1 ORDER BY e.sequence DESC LIMIT 500',[req.params.id])).rows;
-  return {items:rows.reverse()};
- },{params,querystring:{type:'object',properties:{after:{type:'integer',minimum:0}}}});
+  // Initial page and older pages are returned in ascending sequence order. The
+  // extra row is used only to compute hasMore; nextBefore lets the client page
+  // backwards without gaps when run generations change.
+  const sql=before>0
+   ? 'SELECT e.*,r.stage FROM runtime_events e LEFT JOIN agent_runs r ON r.id=e.run_id WHERE e.task_id=$1 AND e.sequence<$2 ORDER BY e.sequence DESC LIMIT $3'
+   : 'SELECT e.*,r.stage FROM runtime_events e LEFT JOIN agent_runs r ON r.id=e.run_id WHERE e.task_id=$1 ORDER BY e.sequence DESC LIMIT $2';
+  const rows=(await pool.query(sql,before>0?[req.params.id,before,limit+1]:[req.params.id,limit+1])).rows;
+  const hasMore=rows.length>limit;
+  const items=rows.slice(0,limit).reverse();
+  return {items,hasMore,nextBefore:items[0]?.sequence??null};
+ },{params,querystring:{type:'object',properties:{after:{type:'integer',minimum:0},before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:500}}}});
  route('GET','/api/v1/lane',publicAuth,async(req:any)=>{
   const {stage,limit=20,cursor}=req.query;let anchor:any[]=[];
   if(cursor){try{anchor=JSON.parse(Buffer.from(cursor,'base64url').toString());}catch{throw new ApiError(400,'invalid_cursor','Invalid cursor');}if(anchor.length!==3||anchor[0]!==stage)throw new ApiError(400,'invalid_cursor','Cursor belongs to another lane');}

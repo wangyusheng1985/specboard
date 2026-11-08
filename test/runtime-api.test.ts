@@ -22,6 +22,22 @@ test('PostgreSQL runtime claims exclusively, scopes tokens, deduplicates events 
   const events={events:[{sequence:1,type:'progress',payload:{message:'done'}}]};
   for(let n=0;n<2;n++){const r=await app.inject({method:'POST',url:`/internal/v1/runs/${run.id}/events`,headers,payload:events});assert.equal(r.statusCode,200,r.body);assert.equal(r.json().acknowledged,1);}
   const timeline=await app.inject({url:`/api/v1/tasks/${task.id}/events`,headers:auth});assert.equal(timeline.json().items.filter((e:any)=>e.type==='progress').length,1);
+  const extra={events:[2,3,4,5].map(sequence=>({sequence,type:'progress',payload:{sequence}}))};
+  assert.equal((await app.inject({method:'POST',url:`/internal/v1/runs/${run.id}/events`,headers,payload:extra})).statusCode,200);
+  const firstPage=(await app.inject({url:`/api/v1/tasks/${task.id}/events?limit=2`,headers:auth})).json();
+  assert.equal(firstPage.items.length,2);assert.equal(firstPage.hasMore,true);assert.ok(firstPage.nextBefore);
+  const seen=firstPage.items.map((event:any)=>Number(event.sequence));
+  let before=firstPage.nextBefore;
+  while(before){
+   const page=(await app.inject({url:`/api/v1/tasks/${task.id}/events?before=${before}&limit=2`,headers:auth})).json();
+   for(const event of page.items)seen.push(Number(event.sequence));
+   assert.ok(page.items.every((event:any)=>Number(event.sequence)<Number(before)),'older pages must move strictly backwards');
+   if(!page.hasMore)break;
+   before=page.nextBefore;
+  }
+  assert.equal(new Set(seen).size,seen.length);
+  const all=(await app.inject({url:`/api/v1/tasks/${task.id}/events?limit=500`,headers:auth})).json();
+  assert.deepEqual([...seen].sort((a,b)=>a-b),all.items.map((event:any)=>Number(event.sequence)));
   const complete=await app.inject({method:'POST',url:`/internal/v1/runs/${run.id}/complete`,headers,payload:{status:'completed',summary:'explored'}});assert.equal(complete.statusCode,200,complete.body);
   assert.equal((await app.inject({url:`/api/v1/tasks/${task.id}`,headers:auth})).json().status,'waiting_input');
   const stale=await app.inject({method:'POST',url:`/internal/v1/runs/${run.id}/heartbeat`,headers,payload:{}});assert.equal(stale.statusCode,409);

@@ -405,8 +405,11 @@ dialog.artifact-preview-dialog::backdrop{background:#0f172a88;backdrop-filter:bl
 .chat-tool-single-body{padding:10px 14px 12px;border-top:1px solid #f1f5f9;display:flex;flex-direction:column;gap:10px;background:#fafafa}
 .tool-body-section{display:flex;flex-direction:column;gap:4px}
 .tool-body-section-title{font-size:11px;font-weight:650;color:#64748b;text-transform:uppercase;letter-spacing:.5px}
-.tool-code-block{margin:0;padding:8px 10px;background:#1e293b;color:#f8fafc;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11.5px;line-height:1.5;max-height:240px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+.tool-code-block{margin:0;padding:8px 10px;background:#1e293b;color:#f8fafc;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11.5px;line-height:1.5;max-height:min(480px,60vh);overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+.tool-code-block.is-expanded{max-height:none}
 .tool-result-block{background:#090d16;color:#e2e8f0;border-left:3px solid #10b981}
+.tool-output-expand{align-self:flex-start;display:inline-flex;align-items:center;justify-content:center;min-height:26px;height:26px;margin-top:2px;padding:0 10px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#475569;font-size:11px;font-weight:600;line-height:1;cursor:pointer;transition:all .15s ease}
+.tool-output-expand:hover{background:#eef2ff;border-color:#aab2e8;color:var(--accent)}
 
 /* Card Category 3: Reply Card */
 .chat-card-reply{background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 2px 8px rgba(15,23,42,.04);padding:14px 18px;max-width:88%;margin-bottom:12px;word-break:break-word}

@@ -3,6 +3,7 @@ import {createNotificationAdapter,createTaskObserver,notificationTarget} from '.
 import {markdown} from './markdown.js';
 import {DetailRefreshState} from './detail-refresh-state.js';
 import {filterVisibleDiagnostics, normalizeStructuredDiagnosis} from './diagnostic-presentation.js';
+import {truncateToolOutput} from './tool-output.js';
 const stages=['Explore','Propose','Apply','MR','Archive'];
 const uuid=()=>crypto.randomUUID?.()||([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c=>(c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16));
 const statuses={claimed:'等待执行',awaiting_answers:'等待回答',queued:'等待执行',running:'执行中',waiting_input:'等待补充',paused:'已暂停',failed:'执行失败',completed:'已完成',stopped:'已停止',interrupted:'执行中断'};
@@ -1888,9 +1889,22 @@ function createSingleToolCard(tc) {
   const resultSection = el('div', undefined, 'tool-body-section');
   const resultTitle = el('div', '执行结果 (Output)', 'tool-body-section-title');
   const rawText = extractToolResultText(tc.result);
-  const truncatedText = rawText.length > 10000 ? rawText.slice(0, 10000) + '\n\n...[内容已截断保护]' : rawText;
-  const resultPre = el('pre', truncatedText || '(空结果)', 'tool-code-block tool-result-block');
+  const output = truncateToolOutput(rawText);
+  const resultText = output.truncated
+   ? `${output.text}\n\n...[原始结果共 ${output.originalLength.toLocaleString()} 字符，已保留开头和结尾]...`
+   : output.text;
+  const resultPre = el('pre', resultText || '(空结果)', 'tool-code-block tool-result-block');
+  const expandLabel = output.truncated ? '展开已截断输出' : '展开完整输出';
+  const expand = el('button', expandLabel, 'tool-output-expand');
+  expand.type = 'button';
+  expand.setAttribute('aria-expanded', 'false');
+  expand.onclick = () => {
+   const expanded = resultPre.classList.toggle('is-expanded');
+   expand.textContent = expanded ? '收起输出' : expandLabel;
+   expand.setAttribute('aria-expanded', String(expanded));
+  };
   resultSection.append(resultTitle, resultPre);
+  if (output.originalLength > 2000) resultSection.append(expand);
   body.append(resultSection);
  }
 

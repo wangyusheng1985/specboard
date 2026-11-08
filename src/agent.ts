@@ -7,6 +7,7 @@ import { Type } from 'typebox';
 import type { Store, Task, Stage } from './store.ts';
 import { stages } from './store.ts';
 import type { Workspaces } from './workspaces.ts';
+import { shouldEnableBashTool } from './agent-tool-policy.ts';
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -54,7 +55,7 @@ export function piFactory(store:Store, workspaces:Workspaces, sessionsRoot:strin
     'The host stage transition is authorization to perform this stage within the task worktree. Ask substantive questions in the conversation and stop to await input. Explore can generate prototype, html mockup, demo or summary artifacts directly in the workspace when requested without asking for permission. Propose writes planning artifacts only. Apply implements the selected change. Archive checks completion then archives that change.']});
   await resourceLoader.reload();
   const {session}=await createAgentSession({cwd,agentDir,modelRuntime:runtime,model,resourceLoader,settingsManager:settings,sessionManager,
-   tools:task.stage==='Explore'?['read','grep','find','ls','edit','write','openspec','request_stage_transition']:['read','grep','find','ls','bash','edit','write','request_stage_transition'],
+   tools:shouldEnableBashTool(task)?['read','grep','find','ls','bash','edit','write','request_stage_transition']:['read','grep','find','ls','edit','write','openspec','request_stage_transition'],
    customTools:[createBashToolDefinition(cwd,{spawnHook:context=>({...context,env:toolEnvironment()})}) as unknown as ToolDefinition,{name:'openspec',label:'OpenSpec read-only CLI',description:'Read OpenSpec changes, specs, status and instructions without mutating files.',parameters:Type.Object({command:Type.Union(['list','status','show','instructions','validate','context'].map(s=>Type.Literal(s))),args:Type.Array(Type.String())}),execute:async(_id,params)=>{
     const input=params as {command:string;args:string[]};
     if(!['list','status','show','instructions','validate','context'].includes(input.command)||input.args.some(a=>a.includes('\0')))throw new Error('Invalid OpenSpec command');

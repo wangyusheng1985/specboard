@@ -11,6 +11,7 @@ import {verifyStage} from './stage-verification.ts';
 import {createHash} from 'node:crypto';
 import {getArchivePromptGuidance} from './archive-policy.ts';
 import {shouldEnableBashTool} from './agent-tool-policy.ts';
+import {agentStartPrompt,CHAT_SYSTEM_PROMPT,isChatTask} from './agent-mode.ts';
 export {getArchivePromptGuidance};
 
 import {execFile} from 'node:child_process';
@@ -65,10 +66,15 @@ export async function runAgent(paths={workspaces:'/workspaces',sessions:'/sessio
   }else{
    await mkdir(cwd,{recursive:true});
   }
-  const require=createRequire(import.meta.url),rootPackage=dirname(dirname(require.resolve('@fission-ai/openspec')));
-  const skills:Record<string,[string,string]>={Explore:['explore','getExploreSkillTemplate'],Propose:['propose','getOpsxProposeSkillTemplate'],Apply:['apply-change','getApplyChangeSkillTemplate'],MR:['apply-change','getApplyChangeSkillTemplate'],Archive:['archive-change','getArchiveChangeSkillTemplate']};
-  const [file,method]=skills[task.stage],module=await import(join(rootPackage,'dist/core/templates/workflows',file+'.js')),skill=module[method]().instructions;
-  if(!await stat(join(cwd,'openspec')).catch(()=>null)){await mkdir(join(cwd,'openspec'),{recursive:true});await writeFile(join(cwd,'openspec/config.yaml'),'schema: spec-driven\n');}
+  const chat=isChatTask(task);
+  let skill:string;
+  if(chat){skill=CHAT_SYSTEM_PROMPT;}
+  else{
+   const require=createRequire(import.meta.url),rootPackage=dirname(dirname(require.resolve('@fission-ai/openspec')));
+   const skills:Record<string,[string,string]>={Explore:['explore','getExploreSkillTemplate'],Propose:['propose','getOpsxProposeSkillTemplate'],Apply:['apply-change','getApplyChangeSkillTemplate'],MR:['apply-change','getApplyChangeSkillTemplate'],Archive:['archive-change','getArchiveChangeSkillTemplate']};
+   const [file,method]=skills[task.stage],module=await import(join(rootPackage,'dist/core/templates/workflows',file+'.js'));skill=module[method]().instructions;
+   if(!await stat(join(cwd,'openspec')).catch(()=>null)){await mkdir(join(cwd,'openspec'),{recursive:true});await writeFile(join(cwd,'openspec','config.yaml'),'schema: spec-driven\n');}
+  }
   step='session';
   const agentDir=join(paths.sessions,task.id,'config');await mkdir(agentDir,{recursive:true});
   const runtime=await ModelRuntime.create({modelsPath:null,authPath:join(agentDir,'auth.json')});
@@ -90,11 +96,12 @@ export async function runAgent(paths={workspaces:'/workspaces',sessions:'/sessio
     remoteTracksSpecs=false;
    }
   }
+  const stageGuidance=`Execute only ${task.stage}. Change name task-${task.id}. Never advance stages or push remote changes automatically. The container includes python3, pip, venv, ruff and Go (go test, go vet, gofmt). Root filesystem is read-only; use the task worktree for virtual environments and generated files. Use /tmp for caches, with GOCACHE=/tmp/go-cache, GOMODCACHE=/tmp/go-mod and GOPATH=/tmp/go-path. Run ruff with --no-cache or set its cache under /tmp. Never install into system directories. Return results, validation and blockers. In Explore stage and Chat mode, when user explicitly requests generating or creating a prototype, demonstration, mockup, html file (such as demo_preview.html) or architecture diagram, you are ALREADY FULLY AUTHORIZED to generate and write that file immediately in the workspace using your write/edit tools. Do NOT ask the user for confirmation or permission again. Create the file directly and present your work. When substantive product decisions or user choices are needed call request_clarification with questions containing id, type (single_choice, multiple_choice, text, confirmation), prompt, reason, required, and options with id/label for choice types. Never assume a user answer. You have web_search and fetch_content tools available to look up current documentation and technical information from the web. When exploring code or answering questions, search or inspect project files first as ground truth when a project is bound; use web tools to supplement missing context or read external references.`;
+  const chatGuidance='In Chat mode the bash tool is for read-only repository inspection such as git log, git show, git diff, git status and git branch. Never push, merge, or modify remote resources.';
   const loader=new DefaultResourceLoader({cwd,agentDir,noExtensions:true,noSkills:true,noPromptTemplates:true,appendSystemPromptOverride:()=>[
    skill,
-   `Execute only ${task.stage}. Change name task-${task.id}. Never advance stages or push remote changes automatically. The container includes python3, pip, venv, ruff and Go (go test, go vet, gofmt). Root filesystem is read-only; use the task worktree for virtual environments and generated files. Use /tmp for caches, with GOCACHE=/tmp/go-cache, GOMODCACHE=/tmp/go-mod and GOPATH=/tmp/go-path. Run ruff with --no-cache or set its cache under /tmp. Never install into system directories. Return results, validation and blockers. In Explore stage and Chat mode, when user explicitly requests generating or creating a prototype, demonstration, mockup, html file (such as demo_preview.html) or architecture diagram, you are ALREADY FULLY AUTHORIZED to generate and write that file immediately in the workspace using your write/edit tools. Do NOT ask the user for confirmation or permission again. Create the file directly and present your work. When substantive product decisions or user choices are needed call request_clarification with questions containing id, type (single_choice, multiple_choice, text, confirmation), prompt, reason, required, and options with id/label for choice types. Never assume a user answer. You have web_search and fetch_content tools available to look up current documentation and technical information from the web. When exploring code or answering questions, search or inspect project files first as ground truth when a project is bound; use web tools to supplement missing context or read external references.`,
-   ...(task.kind==='chat'?['In Chat mode, use the bash tool for read-only repository inspection such as git log, git show, git diff, git status and git branch. Never push, merge, or modify remote resources.']:[]),
-   ...(task.stage==='Archive'?[getArchivePromptGuidance(remoteTracksSpecs)]:[]),
+   ...(chat?[chatGuidance]:[stageGuidance]),
+   ...(task.stage==='Archive'&&!chat?[getArchivePromptGuidance(remoteTracksSpecs)]:[]),
   ]});await loader.reload();
   const definitions=[createReadToolDefinition(cwd),createGrepToolDefinition(cwd),createFindToolDefinition(cwd),createLsToolDefinition(cwd),createEditToolDefinition(cwd),createWriteToolDefinition(cwd),...(shouldEnableBashTool(task)?[createBashToolDefinition(cwd,{spawnHook:ctx=>({...ctx,env:{...gitEnv,PATH:'/app/node_modules/.bin:'+env.PATH}})})]:[])] as ToolDefinition[];
   const guarded=definitions.map(tool=>({...tool,execute:async(...args:Parameters<ToolDefinition['execute']>)=>{if(questionBatch)throw new Error('Waiting for user answers');return tool.execute(...args);}}));
@@ -199,7 +206,7 @@ export async function runAgent(paths={workspaces:'/workspaces',sessions:'/sessio
    return;
   }
   step='model';
-  await session.prompt(`Task: ${task.description}\nPrevious results: ${JSON.stringify(context.previousResults)}\nExecute ${task.stage} using its skill.`);
+  await session.prompt(agentStartPrompt(task,context.previousResults));
   finished=true;commandAbort.abort();await polling;await flush();
   if(questionBatch){const file=await open(session.sessionFile,'r+');try{await file.sync();}finally{await file.close();}await call('clarification-ready',{batchId:questionBatch});return;}
   const last=session.messages.at(-1);if(last?.stopReason==='error'){let envelope:any;try{const raw=String(last.errorMessage||'');const start=raw.indexOf('{'),end=raw.lastIndexOf('}');const parsed=JSON.parse(raw.slice(start,end+1));envelope=typeof parsed.error==='object'?parsed.error:parsed;}catch{envelope=undefined;}throw Object.assign(new Error(envelope?.message||'LLM gateway request failed'),{category:envelope?.code,requestId:envelope?.requestId,attemptCount:envelope?.attemptCount});}

@@ -8,6 +8,7 @@ import type { Store, Task, Stage } from './store.ts';
 import { stages } from './store.ts';
 import type { Workspaces } from './workspaces.ts';
 import { shouldEnableBashTool } from './agent-tool-policy.ts';
+import { agentStartPrompt, CHAT_SYSTEM_PROMPT, isChatTask } from './agent-mode.ts';
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -29,15 +30,19 @@ export function piFactory(store:Store, workspaces:Workspaces, sessionsRoot:strin
  return async(task,emit,requestTransition)=>{
   const cwd=await workspaces.prepare(task);
   await mkdir(sessionsRoot,{recursive:true}); await mkdir(agentDir,{recursive:true});
-  if(!await stat(join(cwd,'openspec')).catch(()=>null)) {
+  const chat=isChatTask(task);
+  if(!chat&&!await stat(join(cwd,'openspec')).catch(()=>null)) {
    await mkdir(join(cwd,'openspec'),{recursive:true});
    await writeFile(join(cwd,'openspec','config.yaml'),'schema: spec-driven\n');
   }
   const packageRoot=dirname(dirname(require.resolve('@fission-ai/openspec')));
-  const module=await import(join(packageRoot,'dist/core/templates/workflows',skillFiles[task.stage]+'.js'));
-  const skill=module[skillFunctions[task.stage]]();
-  const content=skill.body || skill.instructions || skill.content;
-  if(typeof content!=='string')throw new Error('OpenSpec skill template is unavailable');
+  const content=chat?CHAT_SYSTEM_PROMPT:await (async()=>{
+   const module=await import(join(packageRoot,'dist/core/templates/workflows',skillFiles[task.stage]+'.js'));
+   const skill=module[skillFunctions[task.stage]]();
+   const value=skill.body || skill.instructions || skill.content;
+   if(typeof value!=='string')throw new Error('OpenSpec skill template is unavailable');
+   return value;
+  })();
   const skillVersion=createHash('sha256').update(content).digest('hex');
   const previous=store.db.prepare('SELECT * FROM conversations WHERE task_id=? AND stage=?').get(task.id,task.stage);
   const sessionManager=previous?.session_path && await stat(previous.session_path as string).catch(()=>null)
@@ -51,7 +56,7 @@ export function piFactory(store:Store, workspaces:Workspaces, sessionsRoot:strin
   const settings=SettingsManager.inMemory();
   const project=task.projectId ? workspaces.project(task.projectId) : { name: 'General Chat', repositoryUrl: '', defaultBranch: 'main' };
   const resourceLoader=new DefaultResourceLoader({cwd,agentDir,settingsManager:settings,noExtensions:true,noSkills:true,noPromptTemplates:true,
-   appendSystemPromptOverride:()=>[content,`You are executing stage ${task.stage} for task ${task.id}. Change name: task-${task.id}. Project: ${project.name}. Stay in this stage. Never advance automatically. Call request_stage_transition only for an explicit user transition request; the host will ask for confirmation. Do not push, merge, deploy, or change remote resources without an explicit user instruction. End with results, validation evidence and blockers.`,
+   appendSystemPromptOverride:()=>chat?[content,`You are chatting in Specboard Chat mode for task ${task.id}. Project: ${project.name}. Answer as a normal conversation; do not execute an OpenSpec stage skill or run openspec commands unless the user explicitly asks for OpenSpec work. Do not push, merge, deploy, or change remote resources without an explicit user instruction.`]:[content,`You are executing stage ${task.stage} for task ${task.id}. Change name: task-${task.id}. Project: ${project.name}. Stay in this stage. Never advance automatically. Call request_stage_transition only for an explicit user transition request; the host will ask for confirmation. Do not push, merge, deploy, or change remote resources without an explicit user instruction. End with results, validation evidence and blockers.`,
     'The host stage transition is authorization to perform this stage within the task worktree. Ask substantive questions in the conversation and stop to await input. Explore can generate prototype, html mockup, demo or summary artifacts directly in the workspace when requested without asking for permission. Propose writes planning artifacts only. Apply implements the selected change. Archive checks completion then archives that change.']});
   await resourceLoader.reload();
   const {session}=await createAgentSession({cwd,agentDir,modelRuntime:runtime,model,resourceLoader,settingsManager:settings,sessionManager,
@@ -107,7 +112,7 @@ export class Coordinator {
     entry.handle=handle;
     if(entry.cancelled){handle.dispose();return;}
     const previous=this.store.db.prepare('SELECT stage,result FROM stage_runs WHERE task_id=? AND result IS NOT NULL ORDER BY started_at DESC LIMIT 4').all(taskId);
-    const initial=`Task: ${task.description}\nChange: task-${task.id}\nStage: ${task.stage}\nPrevious stage results: ${JSON.stringify(previous)}\nExecute the current stage skill and stop for human input or when finished.`;
+    const initial=isChatTask(task)?agentStartPrompt(task,previous):`Task: ${task.description}\nChange: task-${task.id}\nStage: ${task.stage}\nPrevious stage results: ${JSON.stringify(previous)}\nExecute the current stage skill and stop for human input or when finished.`;
     await handle.prompt(text || initial);
     if(!entry.cancelled){
      const result=this.store.redact(handle.text());

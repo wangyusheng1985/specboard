@@ -163,8 +163,18 @@ $('#connect-form').onsubmit=async event=>{
  catch(error){markFormInvalid(form,error.message);}finally{setButtonLoading(button,false);}
 };
 async function refresh(){
- try{projects=await api('/api/v1/projects');const data=Object.fromEntries(await Promise.all(stages.map(async stage=>[stage,await api('/api/v1/lane?stage='+stage+'&limit=20')])));lanes.clear();$('#board').replaceChildren();for(const stage of stages){lanes.set(stage,data[stage]);renderLane(stage);}observeTasks(Object.values(data).flatMap(lane=>lane.items));notice('');}
- catch(error){notice(error.message);}
+ try{
+  projects=await api('/api/v1/projects');
+  const [data,chats]=await Promise.all([
+   Promise.all(stages.map(async stage=>[stage,await api('/api/v1/lane?stage='+stage+'&limit=20')])),
+   api('/api/v1/chats').catch(()=>({items:[]}))
+  ]);
+  const byStage=Object.fromEntries(data);
+  lanes.clear();$('#board').replaceChildren();
+  for(const stage of stages){lanes.set(stage,byStage[stage]);renderLane(stage);}
+  observeTasks([...Object.values(byStage).flatMap(lane=>lane.items),...(chats.items||[])]);
+  notice('');
+ }catch(error){notice(error.message);}
 }
 function getStageLabel(stage,taskOrProject=null){
  if(stage!=='MR')return stage;
@@ -319,8 +329,11 @@ function observeTasks(items){taskObserver.observe(items);}
 async function observeVisibleLaneTasks(){
  if(!notifications.enabled())return;
  try{
-  const pages=await Promise.all(stages.map(stage=>api('/api/v1/lane?stage='+stage+'&limit=20')));
-  if(key)observeTasks(pages.flatMap(page=>page.items));
+  const [pages,chats]=await Promise.all([
+   Promise.all(stages.map(stage=>api('/api/v1/lane?stage='+stage+'&limit=20'))),
+   api('/api/v1/chats').catch(()=>({items:[]}))
+  ]);
+  if(key)observeTasks([...pages.flatMap(page=>page.items),...(chats.items||[])]);
  }catch{/* Notification observation must never interrupt task polling. */}
 }
 let locatingNotification=false;

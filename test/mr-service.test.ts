@@ -625,3 +625,55 @@ test('normalizeMarkdown converts Chinese ordered markers and keeps valid markdow
  assert.match(description, /\n\n1\. 第一条\n2\. 第二条/);
  assert.doesNotMatch(description, /1、/);
 });
+
+test('runMRStage keeps polling while a CI job is still running', async () => {
+ const fs=await import('node:fs'),os=await import('node:os'),path=await import('node:path');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'mr-active-ci-'));
+ fs.writeFileSync(path.join(dir,'.gitlab-ci.yml'),'stages:\n  - build\n');
+ let pipelineQueries=0;
+ const server=createServer((req,res)=>{
+  const url=new URL(req.url!,`http://${req.headers.host}`);
+  res.setHeader('content-type','application/json');
+  if(url.pathname.endsWith('/merge_requests')&&req.method==='GET')return res.end('[]');
+  if(url.pathname.endsWith('/merge_requests')&&req.method==='POST')return res.end(JSON.stringify({id:1,iid:4,title:'feat(token): test',web_url:'http://example.test/mr/4',source_branch:'specboard/t-active',target_branch:'main',state:'opened'}));
+  if(url.pathname.endsWith('/jobs'))return res.end(JSON.stringify([{id:11,name:'build',stage:'build',status:'running'}]));
+  if(url.pathname.endsWith('/pipelines')){
+   pipelineQueries++;
+   return res.end(JSON.stringify([{id:77,iid:1,status:pipelineQueries>6?'success':'running',ref:'specboard/t-active',sha:'abc',web_url:'http://example.test/pipeline/77',updated_at:'2026-01-01T00:00:00Z'}]));
+  }
+  res.statusCode=404;res.end('{}');
+ });
+ await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+ try{
+  const port=(server.address() as any).port;
+  const result=await runMRStage({
+   cwd:dir,taskId:'t-active',description:'Long CI task',repositoryUrl:`http://127.0.0.1:${port}/group/project.git`,defaultBranch:'main',token:'secret',
+   git:async()=>({stdout:''}),call:async()=>({saved:true}),pollIntervalMs:10,idleTimeoutMs:30,maxWaitMs:2000,discoveryTimeoutMs:200,discoveryPollIntervalMs:10,maxRounds:1
+  });
+  assert.equal(result.pipeline?.status,'success');
+  assert.ok(pipelineQueries>6,`expected more than 6 pipeline queries, got ${pipelineQueries}`);
+ }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('runMRStage times out only after a period without progress', async () => {
+ const fs=await import('node:fs'),os=await import('node:os'),path=await import('node:path');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'mr-idle-ci-'));
+ fs.writeFileSync(path.join(dir,'.gitlab-ci.yml'),'stages:\n  - build\n');
+ const server=createServer((req,res)=>{
+  const url=new URL(req.url!,`http://${req.headers.host}`);
+  res.setHeader('content-type','application/json');
+  if(url.pathname.endsWith('/merge_requests')&&req.method==='GET')return res.end('[]');
+  if(url.pathname.endsWith('/merge_requests')&&req.method==='POST')return res.end(JSON.stringify({id:1,iid:5,title:'feat(token): test',web_url:'http://example.test/mr/5',source_branch:'specboard/t-idle',target_branch:'main',state:'opened'}));
+  if(url.pathname.endsWith('/jobs'))return res.end('[]');
+  if(url.pathname.endsWith('/pipelines'))return res.end(JSON.stringify([{id:78,iid:1,status:'running',ref:'specboard/t-idle',sha:'abc',web_url:'http://example.test/pipeline/78',updated_at:'2026-01-01T00:00:00Z'}]));
+  res.statusCode=404;res.end('{}');
+ });
+ await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+ try{
+  const port=(server.address() as any).port;
+  await assert.rejects(runMRStage({
+   cwd:dir,taskId:'t-idle',description:'Stuck CI task',repositoryUrl:`http://127.0.0.1:${port}/group/project.git`,defaultBranch:'main',token:'secret',
+   git:async()=>({stdout:''}),call:async()=>({saved:true}),pollIntervalMs:10,idleTimeoutMs:40,maxWaitMs:2000,discoveryTimeoutMs:200,discoveryPollIntervalMs:10,maxRounds:1
+  }),/timed out after .* without progress/);
+ }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));fs.rmSync(dir,{recursive:true,force:true});}
+});

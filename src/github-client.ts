@@ -19,6 +19,7 @@ export interface GitHubWorkflowRun {
  html_url: string;
  head_branch: string;
  head_sha: string;
+ updated_at?: string;
 }
 
 export interface GitHubJob {
@@ -196,10 +197,34 @@ export class GitHubClient {
     conclusion: run.conclusion,
     html_url: run.html_url,
     head_branch: run.head_branch || branch,
-    head_sha: run.head_sha
+    head_sha: run.head_sha,
+    updated_at: run.updated_at
    };
   } catch {
    return null;
+  }
+ }
+
+ async getWorkflowJobs(runId: number): Promise<GitHubJob[]> {
+  try {
+   const res = await this.octokit.rest.actions.listJobsForWorkflowRun({
+    owner: this.owner,
+    repo: this.repo,
+    run_id: runId,
+    per_page: 100
+   });
+   return (res.data.jobs || []).map(job => ({
+    id: job.id,
+    name: job.name,
+    status: job.status,
+    conclusion: job.conclusion,
+    html_url: job.html_url || undefined,
+    labels: job.labels,
+    runner_name: job.runner_name,
+    runner_group_name: job.runner_group_name
+   }));
+  } catch {
+   return [];
   }
  }
 

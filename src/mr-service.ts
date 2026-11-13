@@ -14,6 +14,8 @@ export interface MRStageContext {
  session?: any;
  pollIntervalMs?: number;
  maxPolls?: number;
+ idleTimeoutMs?: number;
+ maxWaitMs?: number;
  maxRounds?: number;
  discoveryTimeoutMs?: number;
  discoveryPollIntervalMs?: number;
@@ -300,7 +302,9 @@ export async function runMRStage(ctx: MRStageContext) {
   call,
   session,
   pollIntervalMs = 5000,
-  maxPolls = 120,
+  maxPolls = 0,
+  idleTimeoutMs = 600000,
+  maxWaitMs = 6 * 60 * 60 * 1000,
   maxRounds = 5
  } = ctx;
 
@@ -484,8 +488,24 @@ export async function runMRStage(ctx: MRStageContext) {
 
  while (rounds < maxRounds) {
   let pollCount = 0;
-  while (pipeline && ['pending', 'running', 'created', 'waiting_for_resource', 'preparing'].includes(pipeline.status) && pollCount < maxPolls) {
+  const waitStartedAt = Date.now();
+  let lastChangeAt = waitStartedAt;
+  let signature = '';
+  const runningStatuses = ['pending', 'running', 'created', 'waiting_for_resource', 'preparing'];
+  while (pipeline && runningStatuses.includes(pipeline.status)) {
+   if (maxPolls > 0 && pollCount >= maxPolls) break;
    pollCount++;
+   const nextSignature = `${pipeline.status}|${pipeline.updatedAt || ''}|${pipeline.active ? 'active' : 'idle'}`;
+   if (nextSignature !== signature) {
+    signature = nextSignature;
+    lastChangeAt = Date.now();
+   }
+   if (Date.now() - waitStartedAt >= maxWaitMs) {
+    throw new Error(`${platformName} ${ciOrActions} exceeded the maximum wait of ${Math.round(maxWaitMs / 1000)}s`);
+   }
+   // Keep waiting while a job is still running: a long CI does not mean it is
+   // stuck. Only time out after a period with no observable progress.
+   if (!pipeline.active && Date.now() - lastChangeAt >= idleTimeoutMs) break;
    await call('mr', {
     mrIid: mr.iid,
     webUrl: mr.web_url,
@@ -499,8 +519,8 @@ export async function runMRStage(ctx: MRStageContext) {
    pipeline = await platform.getLatestPipeline(branch);
   }
 
-  if (pipeline && ['pending', 'running', 'created', 'waiting_for_resource', 'preparing'].includes(pipeline.status)) {
-   throw new Error(`${platformName} ${ciOrActions} timed out waiting for completion after ${Math.round((maxPolls * pollIntervalMs) / 1000)}s`);
+  if (pipeline && runningStatuses.includes(pipeline.status)) {
+   throw new Error(`${platformName} ${ciOrActions} timed out after ${Math.round(idleTimeoutMs / 1000)}s without progress`);
   }
 
   if (pipeline?.status === 'success') {

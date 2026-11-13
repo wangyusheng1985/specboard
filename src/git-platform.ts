@@ -17,6 +17,8 @@ export interface UnifiedPipeline {
  web_url: string;
  is_actions: boolean;
  sha?: string;
+ updatedAt?: string;
+ active?: boolean;
 }
 
 export interface GitPlatformClient {
@@ -77,12 +79,15 @@ export function createGitPlatformClient(repositoryUrl: string, token: string): G
       status = run.conclusion || run.status;
      }
     }
+    const jobs = await client.getWorkflowJobs(run.id).catch(() => []);
     return {
      id: run.id,
      status,
      web_url: run.html_url,
      is_actions: true,
-     sha: run.head_sha
+     sha: run.head_sha,
+     updatedAt: run.updated_at,
+     active: jobs.some(job => job.status === 'in_progress')
     };
    },
    async getFailedJobTrace(pipelineId: number) {
@@ -109,12 +114,15 @@ export function createGitPlatformClient(repositoryUrl: string, token: string): G
   async getLatestPipeline(branch: string) {
    const p = await gitlab.getLatestPipeline(branch);
    if (!p) return null;
+   const jobs = await gitlab.getPipelineJobs(p.id);
    return {
     id: p.id,
     status: p.status,
     web_url: p.web_url,
     is_actions: false,
-    sha: p.sha
+    sha: p.sha,
+    updatedAt: p.updated_at,
+    active: jobs.some(job => job.status === 'running')
    };
   },
   async getFailedJobTrace(pipelineId: number) {

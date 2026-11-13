@@ -84,18 +84,118 @@ export function detectChangeType(description: string, changedFiles: string[] = [
  return 'feat';
 }
 
-export function renderMRTitle(type: MRChangeType, description: string): string {
- // Remove existing prefixes if user already typed one
+const scopeTerms: Array<[RegExp,string]> = [
+ [/令牌|token/i,'token'],
+ [/通知|notification/i,'notifications'],
+ [/聊天|会话|chat|session/i,'chat'],
+ [/蜂后|queen/i,'queen'],
+ [/工蜂|worker/i,'worker'],
+ [/合并请求|merge request|pull request|\bmr\b|\bpr\b/i,'mr'],
+ [/文档|readme|docs?/i,'docs'],
+ [/测试|test/i,'test'],
+ [/流水线|pipeline|\bci\b/i,'ci'],
+];
+
+const fileScopeTerms: Array<[RegExp,string]> = [
+ [/^public\//i,'ui'],
+ [/^src\/agent/i,'agent'],
+ [/^src\/mr-service/i,'mr'],
+ [/^src\/runtime-(?:api|service)/i,'api'],
+ [/^src\/dispatcher/i,'dispatcher'],
+ [/^src\/(?:gateway|llm-)/i,'gateway'],
+ [/^src\/(?:store|postgres)/i,'storage'],
+ [/^test\//i,'test'],
+ [/^docs\/|\.md$/i,'docs'],
+ [/^\.github\/|(?:^|\/)Dockerfile|compose|\.gitlab-ci/i,'ci'],
+ [/^package(?:-lock)?\.json$/i,'deps'],
+];
+
+const summaryTerms: Array<[RegExp,string]> = [
+ [/蜂后|queen/i,'queen'],
+ [/工蜂|worker/i,'worker'],
+ [/令牌|token/i,'token'],
+ [/汇总|合计|summary|aggregate/i,'summary'],
+ [/聊天|chat/i,'chat'],
+ [/会话|session/i,'session'],
+ [/弹框|弹窗|dialog|modal/i,'dialog'],
+ [/详情|detail/i,'details'],
+ [/任务|task/i,'task'],
+ [/删除|移除|delete|remove/i,'delete'],
+ [/拖拽|drag/i,'drag'],
+ [/垃圾桶|trash/i,'trash'],
+ [/文档|readme|docs?/i,'docs'],
+ [/测试|test/i,'test'],
+ [/配置|config/i,'config'],
+ [/修复|fix|bug/i,'fix'],
+ [/增加|新增|添加|支持|add|support/i,'add'],
+ [/优化|改进|improve|optimi[sz]e/i,'improve'],
+ [/重构|refactor/i,'refactor'],
+ [/更新|update/i,'update'],
+ [/实现|implement/i,'implement'],
+ [/报错|错误|异常|抛错|error|exception/i,'error'],
+];
+
+const summaryStopWords = new Set(['the','and','for','with','from','this','that','into','when','then','than','src','public','test']);
+
+export function inferMRScope(description: string, changedFiles: string[] = []): string {
+ for (const [pattern, scope] of scopeTerms) if (pattern.test(description)) return scope;
+ const scores = new Map<string, number>();
+ for (const file of changedFiles) {
+  for (const [pattern, scope] of fileScopeTerms) {
+   if (pattern.test(file)) { scores.set(scope, (scores.get(scope) || 0) + 1); break; }
+  }
+ }
+ return [...scores.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 'core';
+}
+
+export function renderEnglishSummary(description: string, type: MRChangeType, scope: string): string {
+ const candidates: Array<{word: string; index: number}> = [];
+ for (const [pattern, word] of summaryTerms) {
+  const index = description.search(pattern);
+  if (index >= 0) candidates.push({word, index});
+ }
+ for (const match of description.matchAll(/[A-Za-z][A-Za-z0-9_-]{2,}/g)) {
+  const word = match[0].toLowerCase();
+  if (!summaryStopWords.has(word)) candidates.push({word, index: match.index ?? 0});
+ }
+ candidates.sort((a, b) => a.index - b.index);
+ const words: string[] = [];
+ for (const {word} of candidates) if (word !== type && word !== scope && !words.includes(word)) words.push(word);
+ const lead = type === 'feat' ? 'add' : type === 'perf' ? 'improve' : type;
+ const leadIndex = words.indexOf(lead);
+ if (leadIndex > 0) { words.splice(leadIndex, 1); words.unshift(lead); }
+ const limited: string[] = [];
+ for (const word of words) {
+  if (limited.length >= 20) break;
+  const next = [...limited, word].join(' ');
+  if (next.length > 100) break;
+  limited.push(word);
+ }
+ return limited.join(' ') || `update ${scope} behavior`;
+}
+
+export function normalizeMarkdown(text: string): string {
+ const lines = text.replace(/\r\n?/g, '\n').split('\n').map(line => {
+  let value = line.replace(/^(\s*)[（(]?\s*(\d+)\s*[）)、．]\s*/, (_, indent: string, n: string) => `${indent}${n}. `);
+  value = value.replace(/^(\s*)[•·●]\s*/, '$1- ');
+  return value;
+ });
+ const output: string[] = [];
+ for (const line of lines) {
+  const previous = output.at(-1) ?? '';
+  if (/^\s*\d+\.\s/.test(line) && previous.trim() && !/^\s*\d+\.\s/.test(previous)) output.push('');
+  output.push(line);
+ }
+ return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+export function renderMRTitle(type: MRChangeType, description: string, changedFiles: string[] = []): string {
  const cleanDesc = description.replace(/^(?:feat|fix|docs|refactor|perf|ci|chore)(?:\([^)]+\))?[:：]\s*/i, '').trim();
- // GitHub and GitLab reject merge request titles longer than 255 characters.
- // Keep the title to a single line and truncate on code points so surrogate
- // pairs (emoji) are never split.
- const firstLine = cleanDesc.split(/\r?\n/, 1)[0].trim();
- const summary = firstLine || cleanDesc;
- const prefix = `${type}: `, budget = 255 - prefix.length;
- const chars = Array.from(summary);
- if (chars.length <= budget) return `${prefix}${summary}`;
- return `${prefix}${chars.slice(0, Math.max(0, budget - 1)).join('')}…`;
+ const scope = inferMRScope(cleanDesc, changedFiles);
+ const summary = renderEnglishSummary(cleanDesc, type, scope);
+ const title = `${type}(${scope}): ${summary}`;
+ const chars = Array.from(title);
+ return chars.length <= 255 ? title : `${chars.slice(0, 254).join('')}…`;
 }
 
 export function renderMRDescription(options: {
@@ -112,48 +212,90 @@ export function renderMRDescription(options: {
   ? changedFiles.map(f => `- \`${f}\``).join('\n')
   : '- （无新增修改文件）';
 
+ const digest = normalizeMarkdown(description);
  const sections: Record<MRChangeType, string> = {
   docs: `### 📖 文档更新说明
-- **变更目标**：${description}
-- **核心调整文档**：
+
+**变更目标**
+
+${digest}
+
+**核心调整文档**
+
 ${fileList}
-- **验证对照**：确认相关技术规范与最新代码实现保持同步，排版格式完整无误。`,
+
+**验证对照**：确认相关技术规范与最新代码实现保持同步，排版格式完整无误。`,
 
   fix: `### 🐛 问题修复说明
-- **问题描述**：${description}
-- **涉及组件与文件**：
+
+**问题描述**
+
+${digest}
+
+**涉及组件与文件**
+
 ${fileList}
-- **修复方案**：已消除异常逻辑并在工作区验证通过。
-- **回归检查**：相关自动化测试及 CI 流水线均已重新验证。`,
+
+**修复方案**：已消除异常逻辑并在工作区验证通过。
+**回归检查**：相关自动化测试及 CI 流水线均已重新验证。`,
 
   feat: `### ✨ 功能特性说明
-- **功能目标**：${description}
-- **主要改动文件**：
+
+**功能目标**
+
+${digest}
+
+**主要改动文件**
+
 ${fileList}
-- **实现亮点**：按照规划与设计契约完成代码落地，提供完备的测试与运行时保障。
-- **影响范围**：合并至 \`${defaultBranch}\` 主分支，不破坏既有兼容性。`,
+
+**实现亮点**：按照规划与设计契约完成代码落地，提供完备的测试与运行时保障。
+**影响范围**：合并至 \`${defaultBranch}\` 主分支，不破坏既有兼容性。`,
 
   refactor: `### 🔨 代码重构说明
-- **重构目的**：${description}
-- **重构范围**：
+
+**重构目的**
+
+${digest}
+
+**重构范围**
+
 ${fileList}
-- **质量保证**：重构前后保持既有业务逻辑契约完全一致，全量自动化回归测试通过。`,
+
+**质量保证**：重构前后保持既有业务逻辑契约完全一致，全量自动化回归测试通过。`,
 
   perf: `### ⚡ 性能优化说明
-- **优化点**：${description}
-- **优化文件**：
+
+**优化点**
+
+${digest}
+
+**优化文件**
+
 ${fileList}
-- **效果预期**：降低资源消耗与响应耗时，通过性能回归检验。`,
+
+**效果预期**：降低资源消耗与响应耗时，通过性能回归检验。`,
 
   ci: `### 👷 流水线与构建变更
-- **构建调整**：${description}
-- **改动配置**：
+
+**构建调整**
+
+${digest}
+
+**改动配置**
+
 ${fileList}
-- **验证状态**：本地测试及远程流水线执行通过。`,
+
+**验证状态**：本地测试及远程流水线执行通过。`,
 
   chore: `### 🧹 常规维护与杂项
-- **维护内容**：${description}
-- **涉及文件**：
+
+**维护内容**
+
+${digest}
+
+**涉及文件**
+
 ${fileList}`
  };
 
@@ -227,9 +369,21 @@ export async function runMRStage(ctx: MRStageContext) {
  const changedFiles = stagedOutput.trim().split('\n').map((s: string) => s.trim()).filter(Boolean);
  const hasChanges = changedFiles.length > 0;
 
+ // Query committed files as well: a retry can run with a clean worktree.
+ let committedFiles: string[] = changedFiles;
+ try {
+  const diffTree = await git(['diff', '--name-only', `origin/${defaultBranch}...HEAD`], cwd);
+  const diffTreeOutput = typeof diffTree === 'string' ? diffTree : diffTree?.stdout || '';
+  const parsed = diffTreeOutput.trim().split('\n').map((s: string) => s.trim()).filter(Boolean);
+  if (parsed.length > 0) committedFiles = parsed;
+ } catch {
+  // Fall back to staged files
+ }
+ const mrFiles = [...new Set([...changedFiles, ...committedFiles])];
+
  // Detect change type and render title/description
- const changeType = detectChangeType(description, changedFiles);
- const mrTitle = renderMRTitle(changeType, description);
+ const changeType = detectChangeType(description, mrFiles);
+ const mrTitle = renderMRTitle(changeType, description, mrFiles);
 
  if (hasChanges) {
   // Check if there is already a commit on this branch beyond origin's default branch
@@ -248,22 +402,11 @@ export async function runMRStage(ctx: MRStageContext) {
   }
  }
 
- // Query all committed files on this branch relative to origin defaultBranch for MR description
- let committedFiles: string[] = changedFiles;
- try {
-  const diffTree = await git(['diff', '--name-only', `origin/${defaultBranch}...HEAD`], cwd);
-  const diffTreeOutput = typeof diffTree === 'string' ? diffTree : diffTree?.stdout || '';
-  const parsed = diffTreeOutput.trim().split('\n').map((s: string) => s.trim()).filter(Boolean);
-  if (parsed.length > 0) committedFiles = parsed;
- } catch {
-  // Fall back to staged files
- }
-
  const mrDescription = renderMRDescription({
   type: changeType,
   description,
   taskId,
-  changedFiles: committedFiles,
+  changedFiles: mrFiles,
   defaultBranch,
   sourceBranch: branch
  });

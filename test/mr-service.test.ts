@@ -527,7 +527,12 @@ test('detectChangeType and renderMRDescription format type-specific MR titles an
  // 1. Docs detection
  assert.equal(detectChangeType('更新系统参考文档与README'), 'docs');
  assert.equal(detectChangeType('update architecture notes', ['README.md', 'docs/guide.md']), 'docs');
- assert.equal(renderMRTitle('docs', '期望基于最新代码情况更新下readme.md和agents.md等等系统参考文档。'), 'docs: 期望基于最新代码情况更新下readme.md和agents.md等等系统参考文档。');
+ const docsTitle = renderMRTitle('docs', '期望基于最新代码情况更新下readme.md和agents.md等等系统参考文档。', ['README.md', 'AGENTS.md']);
+ assert.match(docsTitle, /^docs\(docs\): /);
+ assert.match(docsTitle, /update/);
+ assert.match(docsTitle, /readme/);
+ assert.match(docsTitle, /agents/);
+ assert.doesNotMatch(docsTitle, /[\u4e00-\u9fff]/);
  const docsDesc = renderMRDescription({
   type: 'docs',
   description: '更新系统参考文档',
@@ -541,7 +546,9 @@ test('detectChangeType and renderMRDescription format type-specific MR titles an
 
  // 2. Fix detection
  assert.equal(detectChangeType('修复流水线测试报错及异常退出'), 'fix');
- assert.equal(renderMRTitle('fix', '修复会话断裂抛错'), 'fix: 修复会话断裂抛错');
+ const fixTitle = renderMRTitle('fix', '修复会话断裂抛错');
+ assert.match(fixTitle, /^fix\(chat\): /);
+ assert.match(fixTitle, /error/);
  const fixDesc = renderMRDescription({
   type: 'fix',
   description: '修复会话断裂抛错',
@@ -554,7 +561,7 @@ test('detectChangeType and renderMRDescription format type-specific MR titles an
 
  // 3. Feat detection (default)
  assert.equal(detectChangeType('增加支持垃圾桶拖拽删除任务'), 'feat');
- assert.equal(renderMRTitle('feat', 'feat: 增加支持垃圾桶拖拽删除任务'), 'feat: 增加支持垃圾桶拖拽删除任务');
+ assert.equal(renderMRTitle('feat', 'feat: 增加支持垃圾桶拖拽删除任务'), 'feat(core): add trash drag delete task');
  const featDesc = renderMRDescription({
   type: 'feat',
   description: '增加垃圾桶拖拽删除',
@@ -566,19 +573,46 @@ test('detectChangeType and renderMRDescription format type-specific MR titles an
  assert.ok(featDesc.includes('### ✨ 功能特性说明'));
 });
 
-test('renderMRTitle stays within the 255-character platform limit', async () => {
+test('renderMRTitle uses type(scope): English summary bounded to 20 words and 100 characters', async () => {
  const {renderMRTitle} = await import('../src/mr-service.ts');
  const long = '期望增加一个汇总 Token 的能力。'.repeat(40);
  const title = renderMRTitle('feat', long);
- assert.ok(Array.from(title).length <= 255, `${Array.from(title).length} characters`);
- assert.ok(title.startsWith('feat: 期望增加'));
- assert.ok(title.endsWith('…'));
+ assert.match(title, /^feat\(token\): /);
+ const summary = title.slice('feat(token): '.length);
+ assert.ok(Array.from(title).length <= 255);
+ assert.ok(summary.split(/\s+/).length <= 20, `summary has ${summary.split(/\s+/).length} words`);
+ assert.ok(summary.length <= 100, `summary is ${summary.length} characters`);
+ assert.doesNotMatch(summary, /[\u4e00-\u9fff]/);
 
- const multiline = renderMRTitle('fix', '第一行摘要\n第二行很长的详细说明');
- assert.equal(multiline, 'fix: 第一行摘要');
+ const multiline = renderMRTitle('fix', '修复会话断裂抛错\n第二行详细说明');
+ assert.doesNotMatch(multiline, /\n/);
+ assert.match(multiline, /^fix\(chat\): /);
+});
 
- const emoji = renderMRTitle('feat', '🚀'.repeat(400));
- assert.ok(Array.from(emoji).length <= 255);
- assert.ok(!emoji.includes('\uFFFD'));
- assert.ok(emoji.endsWith('…'));
+test('renderMRTitle infers scope from description first and changed files second', async () => {
+ const {inferMRScope} = await import('../src/mr-service.ts');
+ assert.equal(inferMRScope('增加 Token 汇总', []), 'token');
+ assert.equal(inferMRScope('普通变更', ['public/app.js']), 'ui');
+ assert.equal(inferMRScope('普通变更', ['src/agent-container.ts']), 'agent');
+ assert.equal(inferMRScope('普通变更', ['src/runtime-api.ts']), 'api');
+ assert.equal(inferMRScope('普通变更', []), 'core');
+});
+
+test('normalizeMarkdown converts Chinese ordered markers and keeps valid markdown', async () => {
+ const {normalizeMarkdown, renderMRDescription} = await import('../src/mr-service.ts');
+ assert.equal(normalizeMarkdown('1、第一条\n2、第二条'), '1. 第一条\n2. 第二条');
+ assert.equal(normalizeMarkdown('（1）第一条\n2）第二条\n• 项目'), '1. 第一条\n2. 第二条\n- 项目');
+ assert.match(normalizeMarkdown('说明\n1、第一\n2、第二'), /说明\n\n1\. 第一\n2\. 第二/);
+ assert.doesNotMatch(normalizeMarkdown('1、a'), /1、/);
+
+ const description = renderMRDescription({
+  type: 'feat',
+  description: '目标\n1、第一条\n2、第二条',
+  taskId: 'task-md-1',
+  changedFiles: ['src/example.ts'],
+  defaultBranch: 'main',
+  sourceBranch: 'specboard/task-md-1'
+ });
+ assert.match(description, /\n\n1\. 第一条\n2\. 第二条/);
+ assert.doesNotMatch(description, /1、/);
 });

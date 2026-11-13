@@ -10,6 +10,8 @@ test('detail header chips, preview copy icon and run times are consistent', asyn
  assert.match(css, /\.detail-meta-group \.task-id-chip,[\s\S]*?height:26px;min-height:26px/);
  assert.match(css, /#preview-dialog-copy-btn \.nav-icon\{[^}]*width:15px/);
  assert.match(css, /#preview-dialog-copy-btn \.copy-icon\{[^}]*width:15px/);
+ assert.doesNotMatch(css, /#detail-meta\{font-size:13px;color:var\(--muted\);padding-top:14px\}/);
+ assert.match(css, /\.detail-meta-group #detail-meta\{[^}]*padding:0 10px/);
  assert.match(app, /const started=run\.started_at\|\|run\.created_at,ended=run\.ended_at\|\|run\.updated_at/);
  assert.match(app, /开始：\$\{started\?new Date\(started\)\.toLocaleString\(\):'-'\}/);
 });

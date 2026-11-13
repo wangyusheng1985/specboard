@@ -316,7 +316,13 @@ async function enableNotifications(){
  updateNotificationControl();
 }
 function observeTasks(items){taskObserver.observe(items);}
-async function observeVisibleLaneTasks(){if(!notifications.enabled())return;const pages=await Promise.all(stages.map(stage=>api('/api/v1/lane?stage='+stage+'&limit=20')));if(key)observeTasks(pages.flatMap(page=>page.items));}
+async function observeVisibleLaneTasks(){
+ if(!notifications.enabled())return;
+ try{
+  const pages=await Promise.all(stages.map(stage=>api('/api/v1/lane?stage='+stage+'&limit=20')));
+  if(key)observeTasks(pages.flatMap(page=>page.items));
+ }catch{/* Notification observation must never interrupt task polling. */}
+}
 let locatingNotification=false;
 async function openNotificationTarget(){const target=notificationTarget(location.search);if(!target||locatingNotification)return;if(!key){openDrawer($('#connect-dialog'));return;}locatingNotification=true;try{await openTask(target.task);if(selected?.id===target.task&&target.stage&&stages.indexOf(target.stage)<=stages.indexOf(selected.stage)){viewStage=target.stage;await updateDetail();}}finally{locatingNotification=false;history.replaceState(null,'',location.pathname);}}
 updateNotificationControl();$('#browser-notifications').onclick=enableNotifications;globalThis.addEventListener('focus',updateNotificationControl);
@@ -817,6 +823,9 @@ async function schedulePoll(){
  try{
   if(selected&&$('#detail-dialog').open){
    await updateDetail();
+   // The detail drawer skips the board refresh, so observe the lanes here as
+   // well; otherwise browser notifications stop firing while a task is open.
+   await observeVisibleLaneTasks();
    const active=['queued','running'].includes(selected.status);
    nextDelay=active?2500:8000;
   }else{

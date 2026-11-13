@@ -10,7 +10,11 @@ test('detail stepper lets users inspect completed stage data', async () => {
  assert.match(app, /function renderDetailStepper\(task\)\{[\s\S]*?const viewingIdx=stages\.indexOf\(viewStage\)/);
  assert.match(app, /step\.disabled=idx>currentIdx/);
  assert.match(app, /step\.onclick=\(\)=>\{[\s\S]*?viewStage=stg;[\s\S]*?updateDetail\(\)/);
- assert.match(app, /renderRuns\(runs,viewStage,task\)/);
+ assert.match(app, /renderRuns\(runs,task\)/);
+ assert.doesNotMatch(app, /run\.stage===stage/);
+ assert.match(app, /阶段执行完成 · /);
+ assert.match(app, /type=user_message&limit=500/);
+ assert.match(app, /getStageLabel\(ev\.stage,task\)/);
  assert.match(css, /\.stepper-step\.viewing\{/);
  assert.match(css, /button\.stepper-step\{/);
 });

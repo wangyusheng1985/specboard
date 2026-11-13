@@ -196,20 +196,21 @@ export async function createRuntimeApi(options:{databaseUrl:string;secret:string
  route('GET','/api/v1/tasks/:id/events',publicAuth,async(req:any)=>{
   const after=Number(req.query.after||0),before=Number(req.query.before||0),requested=Number(req.query.limit||500);
   const limit=Number.isFinite(requested)?Math.min(Math.max(Math.trunc(requested),1),500):500;
+  const requestedTypes=String(req.query.type||'').trim(),types=requestedTypes?requestedTypes.split(',').map((value:string)=>value.trim()).filter(Boolean):null;
   if(after>0){
-   return {items:(await pool.query('SELECT e.*,r.stage FROM runtime_events e LEFT JOIN agent_runs r ON r.id=e.run_id WHERE e.task_id=$1 AND e.sequence>$2 ORDER BY e.sequence LIMIT $3',[req.params.id,after,limit])).rows};
+   return {items:(await pool.query('SELECT e.*,r.stage FROM runtime_events e LEFT JOIN agent_runs r ON r.id=e.run_id WHERE e.task_id=$1 AND e.sequence>$2 AND ($4::text[] IS NULL OR e.type = ANY($4)) ORDER BY e.sequence LIMIT $3',[req.params.id,after,limit,types])).rows};
   }
   // Initial page and older pages are returned in ascending sequence order. The
   // extra row is used only to compute hasMore; nextBefore lets the client page
   // backwards without gaps when run generations change.
   const sql=before>0
-   ? 'SELECT e.*,r.stage FROM runtime_events e LEFT JOIN agent_runs r ON r.id=e.run_id WHERE e.task_id=$1 AND e.sequence<$2 ORDER BY e.sequence DESC LIMIT $3'
-   : 'SELECT e.*,r.stage FROM runtime_events e LEFT JOIN agent_runs r ON r.id=e.run_id WHERE e.task_id=$1 ORDER BY e.sequence DESC LIMIT $2';
-  const rows=(await pool.query(sql,before>0?[req.params.id,before,limit+1]:[req.params.id,limit+1])).rows;
+   ? 'SELECT e.*,r.stage FROM runtime_events e LEFT JOIN agent_runs r ON r.id=e.run_id WHERE e.task_id=$1 AND e.sequence<$2 AND ($4::text[] IS NULL OR e.type = ANY($4)) ORDER BY e.sequence DESC LIMIT $3'
+   : 'SELECT e.*,r.stage FROM runtime_events e LEFT JOIN agent_runs r ON r.id=e.run_id WHERE e.task_id=$1 AND ($3::text[] IS NULL OR e.type = ANY($3)) ORDER BY e.sequence DESC LIMIT $2';
+  const rows=(await pool.query(sql,before>0?[req.params.id,before,limit+1,types]:[req.params.id,limit+1,types])).rows;
   const hasMore=rows.length>limit;
   const items=rows.slice(0,limit).reverse();
   return {items,hasMore,nextBefore:items[0]?.sequence??null};
- },{params,querystring:{type:'object',properties:{after:{type:'integer',minimum:0},before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:500}}}});
+ },{params,querystring:{type:'object',properties:{after:{type:'integer',minimum:0},before:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:500},type:{type:'string'}}}});
  route('GET','/api/v1/lane',publicAuth,async(req:any)=>{
   const {stage,limit=20,cursor}=req.query;let anchor:any[]=[];
   if(cursor){try{anchor=JSON.parse(Buffer.from(cursor,'base64url').toString());}catch{throw new ApiError(400,'invalid_cursor','Invalid cursor');}if(anchor.length!==3||anchor[0]!==stage)throw new ApiError(400,'invalid_cursor','Cursor belongs to another lane');}

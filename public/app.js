@@ -585,7 +585,7 @@ async function updateDetail(){
   api(`/api/v1/tasks/${selected.id}/diagnostics`),
   api(`/api/v1/tasks/${selected.id}/artifact-reports`),
   api(`/api/v1/tasks/${selected.id}/mr`).catch(()=>({mr:null})),
-  api(`/api/v1/tasks/${selected.id}/events`).catch(()=>({items:[]}))
+  api(`/api/v1/tasks/${selected.id}/events?type=user_message&limit=500`).catch(()=>({items:[]}))
  ]);
  const diagnostics=Array.isArray(diagnosticsData)?diagnosticsData:(diagnosticsData?.items||[]);
  if(!selected||selected.id!==taskId||!$('#detail-dialog').open||!detailState.current(refreshSequence,taskId,true))return;
@@ -688,7 +688,7 @@ async function updateDetail(){
  const checklist=runs.filter(run=>run.stage==='Propose').reverse().flatMap(run=>(run.artifacts||[]).filter(a=>a.path==='tasks.md'&&typeof a.content==='string')).at(0);
  renderComments(eventsData,task);
  const tasksRoot=$('#propose-tasks');if(!reports.some(r=>r.stage===viewStage))tasksRoot.replaceChildren();tasksRoot.hidden=viewStage!=='Propose';if(viewStage==='Propose'&&!reports.some(r=>r.stage===viewStage)){const panel=el('details');panel.open=true;panel.append(el('summary','实施任务清单 · tasks.md'),checklist?markdown(checklist.content):el('p','暂无任务清单快照，Propose 完成后显示。','empty'));tasksRoot.append(panel);}
- renderRuns(runs,viewStage,task);
+ renderRuns(runs,task);
  $('#proposal').replaceChildren();
 }
 
@@ -697,7 +697,7 @@ function renderComments(eventsData,task){
  const commentsRoot=$('#comments-thread');if(!commentsRoot)return;
  const rawEvents=Array.isArray(eventsData)?eventsData:(eventsData?.items||[]);
  const userEvents=rawEvents.filter(e=>e.type==='user_message'&&Boolean(e.payload?.text));
- const signature=task.id+':'+userEvents.map(e=>e.id+':'+e.created_at+':'+(e.payload?.text?.length||0)).join('|');
+ const signature=task.id+':'+userEvents.map(e=>e.sequence+':'+e.created_at+':'+(e.payload?.text?.length||0)).join('|');
  if(signature===commentsSignature)return;commentsSignature=signature;
  commentsRoot.replaceChildren();
  if(!userEvents.length)return;
@@ -712,7 +712,7 @@ function renderComments(eventsData,task){
    markdown(text)
   );
   msgItem.querySelector('.comment-header').append(
-   el('span','用户指令 · 评论','comment-author'),
+   el('span','用户指令 · 评论'+(ev.stage?' · '+getStageLabel(ev.stage,task):''),'comment-author'),
    el('time',ev.created_at?new Date(Number(ev.created_at)).toLocaleString():'','comment-time')
   );
   threadCard.append(msgItem);
@@ -802,16 +802,16 @@ function renderTaskOverview(task){
  root.append(grid,descTitle,descBox);
 }
 
-function renderRuns(runs,stage,task){
+function renderRuns(runs,task){
  const runsRoot=$('#runs');if(!runsRoot)return;
- const completedRuns=runs.filter(run=>run.stage===stage&&run.status==='completed'&&Boolean(run.summary||run.result));
- const signature=task.id+':'+stage+':'+completedRuns.map(r=>r.id+':'+r.status+':'+(r.summary?.length||0)+':'+(r.result?.length||0)+':'+(r.ended_at||r.started_at||0)).join('|');
+ const completedRuns=runs.filter(run=>run.status==='completed'&&Boolean(run.summary||run.result));
+ const signature=task.id+':'+completedRuns.map(r=>r.id+':'+r.stage+':'+r.status+':'+(r.summary?.length||0)+':'+(r.result?.length||0)+':'+(r.ended_at||r.started_at||0)).join('|');
  if(signature===runsSignature)return;runsSignature=signature;
  runsRoot.replaceChildren(...completedRuns.sort((a,b)=>Number(b.started_at||0)-Number(a.started_at||0)).map(run=>{
   const card=el('article',undefined,'run-card');
   const contentBox=el('div',undefined,'run-card-collapsible is-collapsed');
   contentBox.append(
-   el('h4','阶段执行完成'),
+   el('h4','阶段执行完成 · '+getStageLabel(run.stage,task)),
    el('p',`开始：${run.started_at?new Date(run.started_at).toLocaleString():'-'} · 结束：${run.ended_at?new Date(run.ended_at).toLocaleString():'-'}`,'run-meta'),
    markdown(run.summary||run.result||'')
   );

@@ -7,4 +7,5 @@ data/
 !.env.example
 .git
 *.log
+public/specboard-ca.crt
 

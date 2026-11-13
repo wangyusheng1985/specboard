@@ -282,5 +282,13 @@ export function markdown(text) {
   i++;
  }
 
+ // An unclosed code fence must not swallow the rest of the message. Render
+ // the remaining lines as markdown instead of dropping them from the DOM.
+ if (code) {
+  const fallback = markdown(code.textContent || '');
+  const nodes = fallback.childNodes ? Array.from(fallback.childNodes) : (fallback.children || []);
+  root.append(...nodes);
+ }
+
  return root;
 }

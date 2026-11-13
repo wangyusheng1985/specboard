@@ -119,3 +119,13 @@ test('encodePlantUML compresses and encodes text correctly', async () => {
   assert.ok(encoded?.startsWith('~1'), 'Should start with ~1');
  }
 });
+
+test('markdown preserves content after an unclosed code fence', () => {
+ const source = '## 背景\n\n```html\n<span class="chip"><svg/></span>\n\n## 修改要求\n\n1. 修改 leavesByText\n2. 增加回归测试';
+ const root = markdown(source) as any;
+ const text = root.getText();
+ assert.ok(text.includes('背景'));
+ assert.ok(text.includes('修改要求'));
+ assert.ok(text.includes('leavesByText'));
+ assert.ok(text.includes('增加回归测试'));
+});

@@ -20,4 +20,5 @@ export function createNotificationAdapter(env?:any,storage?:any,channel?:any):{
 };
 export function createTaskObserver(adapter:any,origin?:string):{reset():void;observe(tasks:any[]):void};
 export function notificationFor(previous:any,current:any):string|null;
+export function initialNotification(current:any):string|null;
 export function notificationPayload(task:any,type:string,origin?:string):any;

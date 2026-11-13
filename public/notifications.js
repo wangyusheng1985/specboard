@@ -19,19 +19,25 @@ export function consumeKey(key,storage,channel){
  try{channel?.postMessage({type:'notification-key',key});}catch{}
  return true;
 }
+function notificationType(task){
+ if(!STAGES.includes(task?.stage))return null;
+ if(task.outcome_state==='clarifying'){
+  if(task.stage==='Explore'&&task.status==='waiting_input'&&task.wait_reason!=='clarification_required')return null;
+  return 'clarification_required';
+ }
+ if(task.outcome_state==='awaiting_proposal_approval')return 'proposal_approval_required';
+ if(task.outcome_state==='blocked')return 'execution_blocked';
+ if(task.outcome_state==='delivered'&&(task.stage==='Apply'||task.stage==='MR'))return 'apply_delivered';
+ if(task.outcome_state==='archived'&&task.stage==='Archive')return 'archive_completed';
+ return null;
+}
 export function notificationFor(previous,current){
  if(!previous||!STAGES.includes(current?.stage))return null;
  const changed=previous.outcome_state!==current.outcome_state||previous.outcome_revision!==current.outcome_revision||previous.version!==current.version;
- if(!changed)return null;
- if(current.outcome_state==='clarifying'){
-  if(current.stage==='Explore'&&current.status==='waiting_input'&&current.wait_reason!=='clarification_required')return null;
-  return 'clarification_required';
- }
- if(current.outcome_state==='awaiting_proposal_approval')return 'proposal_approval_required';
- if(current.outcome_state==='blocked')return 'execution_blocked';
- if(current.outcome_state==='delivered'&&(current.stage==='Apply'||current.stage==='MR'))return 'apply_delivered';
- if(current.outcome_state==='archived'&&current.stage==='Archive')return 'archive_completed';
- return null;
+ return changed?notificationType(current):null;
+}
+export function initialNotification(current){
+ return STAGES.includes(current?.stage)?notificationType(current):null;
 }
 export function notificationTarget(search){
  try{const params=new URLSearchParams(search),task=params.get('task'),stage=params.get('stage');if(!UUID.test(task||''))return null;return {task,stage:STAGES.includes(stage)?stage:null};}catch{return null;}
@@ -64,6 +70,6 @@ export function createNotificationAdapter(env=globalThis,storage,channel){
  };
 }
 export function createTaskObserver(adapter,origin=''){
- const snapshots=new Map();
- return {reset(){snapshots.clear();},observe(tasks){const visible=new Set(tasks.map(task=>task.id));for(const id of snapshots.keys())if(!visible.has(id))snapshots.delete(id);for(const task of tasks){const prior=snapshots.get(task.id);snapshots.set(task.id,{...task});while(snapshots.size>2000)snapshots.delete(snapshots.keys().next().value);try{const type=notificationFor(prior,task);if(!type||!adapter.enabled()||adapter.permission()!=='granted')continue;const payload=notificationPayload(task,type,origin);if(payload&&adapter.consume(notificationKey(task,type)))adapter.notify(payload.title,payload.options);}catch{/* Notification failures must never interrupt task refresh. */}}}};
+ const snapshots=new Map();let initialized=false;
+ return {reset(){snapshots.clear();initialized=false;},observe(tasks){const firstPass=!initialized;const visible=new Set(tasks.map(task=>task.id));for(const id of snapshots.keys())if(!visible.has(id))snapshots.delete(id);for(const task of tasks){const prior=snapshots.get(task.id);snapshots.set(task.id,{...task});while(snapshots.size>2000)snapshots.delete(snapshots.keys().next().value);try{const type=prior?notificationFor(prior,task):(firstPass?initialNotification(task):null);if(!type||!adapter.enabled()||adapter.permission()!=='granted')continue;const payload=notificationPayload(task,type,origin);if(payload&&adapter.consume(notificationKey(task,type)))adapter.notify(payload.title,payload.options);}catch{/* Notification failures must never interrupt task refresh. */}}initialized=true;}};
 }

@@ -305,8 +305,8 @@ async function enableNotifications(){
   const result=await notifications.request();
   taskObserver.reset();
   if(result==='granted'){
-   notifications.notifyTest(location.origin);
-   notice('已启用浏览器通知，并发送了一条测试通知');
+   const testNotification=notifications.notifyTest(location.origin);
+   notice(testNotification?'已启用浏览器通知，并发送了一条测试通知':'已启用浏览器通知，但系统未显示测试通知，请检查系统通知与勿扰模式');
   }else if(result==='denied'){
    notice('浏览器已阻止通知，请在浏览器或系统设置中允许通知权限');
   }else if(result==='unsupported'){

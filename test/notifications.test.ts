@@ -28,3 +28,19 @@ test('notifications are bounded, private, and navigate only to validated task ta
 test('storage and BroadcastChannel failures do not break notifications',async()=>{
  const broken={getItem(){throw new Error('denied');},setItem(){throw new Error('full');}},channel:any={postMessage(){throw new Error('closed');}},fixture=environment();const adapter=createNotificationAdapter(fixture.env,broken,channel);await adapter.request();assert.ok(adapter.consume('one'));assert.equal(adapter.consume('one'),false);channel.onmessage({data:{type:'notification-key',key:'other'}});assert.equal(adapter.consume('other'),false);assert.doesNotThrow(()=>channel.onmessage({data:{type:'other'}}));
 });
+
+test('first observation notifies current actionable tasks exactly once', async () => {
+ const {env,notifications}=environment(),store=storage(),adapter=createNotificationAdapter(env,store);
+ await adapter.request();
+ const observer=createTaskObserver(adapter,'http://localhost');
+ observer.observe([{...base,stage:'Apply',outcome_state:'delivered',outcome_revision:2,updated_at:2}]);
+ assert.equal(notifications.length,1,'first observation should notify a delivered task');
+ observer.observe([{...base,stage:'Apply',outcome_state:'delivered',outcome_revision:2,updated_at:2}]);
+ assert.equal(notifications.length,1,'unchanged task should not notify twice');
+ observer.observe([]);
+ observer.observe([{...base,stage:'Apply',outcome_state:'delivered',outcome_revision:2,updated_at:2}]);
+ assert.equal(notifications.length,1,'re-entering the window should not re-notify after initialization');
+ observer.reset();
+ observer.observe([{...base,stage:'Apply',outcome_state:'blocked',outcome_revision:3,updated_at:3}]);
+ assert.equal(notifications.length,2,'reset should establish a new initial notification');
+});

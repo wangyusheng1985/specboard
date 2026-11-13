@@ -6,6 +6,7 @@ import {filterVisibleDiagnostics, normalizeStructuredDiagnosis} from './diagnost
 import {truncateToolOutput} from './tool-output.js';
 import {mergeChatEvents} from './chat-history.js';
 import {chatRoutePath, parseChatRoute} from './chat-route.js';
+if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(()=>{});}
 const stages=['Explore','Propose','Apply','MR','Archive'];
 const uuid=()=>crypto.randomUUID?.()||([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c=>(c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16));
 const statuses={claimed:'等待执行',awaiting_answers:'等待回答',queued:'等待执行',running:'执行中',waiting_input:'等待补充',paused:'已暂停',failed:'执行失败',completed:'已完成',stopped:'已停止',interrupted:'执行中断'};
@@ -316,7 +317,7 @@ async function enableNotifications(){
   taskObserver.reset();
   if(result==='granted'){
    const testNotification=notifications.notifyTest(location.origin);
-   notice(testNotification?'已启用浏览器通知，并发送了一条测试通知':'已启用浏览器通知，但系统未显示测试通知，请检查系统通知与勿扰模式');
+   notice(testNotification?'已启用浏览器通知；已请求系统发送测试通知，如未出现请检查浏览器与系统通知设置':'已启用浏览器通知，但通知请求失败，请检查浏览器通知权限');
   }else if(result==='denied'){
    notice('浏览器已阻止通知，请在浏览器或系统设置中允许通知权限');
   }else if(result==='unsupported'){

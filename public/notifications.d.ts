@@ -15,8 +15,8 @@ export function createNotificationAdapter(env?:any,storage?:any,channel?:any):{
  request():Promise<string>;
  disable():void;
  consume(key:string):boolean;
- notify(title:string,options:any):any;
- notifyTest(origin?:string):any;
+ notify(title:string,options:any):boolean;
+ notifyTest(origin?:string):boolean;
 };
 export function createTaskObserver(adapter:any,origin?:string):{reset():void;observe(tasks:any[]):void};
 export function notificationFor(previous:any,current:any):string|null;

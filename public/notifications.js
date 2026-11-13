@@ -50,6 +50,18 @@ export function notificationPayload(task,type,origin=''){
  const state=type==='clarification_required'?'需要你的回答':type==='proposal_approval_required'?'方案待确认':type==='execution_blocked'?'执行受阻':type==='apply_delivered'?'实现完成，等待审阅':'已手动归档';
  return {title:'Specboard · '+notificationTypes[type],options:{body:`${name} · ${task.stage} ${state}`,icon:'/apple-touch-icon.png',tag:`task:${task.id}:${type}`,data:{url:`${origin}/?task=${task.id}&stage=${task.stage}`}}};
 }
+function showBrowserNotification(env,title,options,onclick){
+ const serviceWorker=env.navigator?.serviceWorker;
+ if(serviceWorker?.getRegistration){
+  try{
+   serviceWorker.getRegistration().then(registration=>{
+    if(registration?.showNotification)return registration.showNotification(title,options);
+   }).catch(()=>{});
+   return true;
+  }catch{}
+ }
+ try{const notification=new env.Notification(title,options);if(onclick)notification.onclick=()=>onclick(notification);return true;}catch{return false;}
+}
 export function createNotificationAdapter(env=globalThis,storage,channel){
  // A browser grant is enough to enable notifications; only an explicit
  // in-app disable should keep them off.
@@ -64,12 +76,12 @@ export function createNotificationAdapter(env=globalThis,storage,channel){
   disable:()=>{enabled=false;setPreference('disabled',storage);},
   consume:key=>{if(seen.has(key))return false;const fresh=consumeKey(key,storage,channel);seen.add(key);while(seen.size>MAX_KEYS)seen.delete(seen.values().next().value);return fresh;},
   notify:(title,options)=>{
-   if(!enabled||permission(env)!=='granted')return null;
-   try{const notification=new env.Notification(title,options);notification.onclick=()=>{notification.close();env.focus?.();const target=notificationTarget(new URL(options.data.url,env.location.origin).search);if(target){env.location.assign('/?task='+target.task+'&stage='+target.stage);}};return notification;}catch{return null;}
+   if(!enabled||permission(env)!=='granted')return false;
+   return showBrowserNotification(env,title,options,notification=>{notification.close();env.focus?.();const target=notificationTarget(new URL(options.data.url,env.location.origin).search);if(target){env.location.assign('/?task='+target.task+'&stage='+target.stage);}});
   },
   notifyTest:(origin='')=>{
-   if(permission(env)!=='granted')return null;
-   try{const notification=new env.Notification('Specboard · 浏览器通知已就绪',{body:'当任务需要回答、方案待确认或交付完成时将在这里提醒你。',icon:'/apple-touch-icon.png',tag:'specboard:test',data:{url:`${origin}/`}});notification.onclick=()=>{notification.close();env.focus?.();};return notification;}catch{return null;}
+   if(permission(env)!=='granted')return false;
+   return showBrowserNotification(env,'Specboard · 浏览器通知已就绪',{body:'当任务需要回答、方案待确认或交付完成时将在这里提醒你。',icon:'/apple-touch-icon.png',tag:'specboard:test',data:{url:`${origin}/`}},notification=>{notification.close();env.focus?.();});
   }
  };
 }

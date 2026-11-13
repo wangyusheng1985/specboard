@@ -669,8 +669,9 @@ async function updateDetail(){
  renderStageArtifacts(runs);
 
  // Update Tab Badges
+ const stageRuns=runs.filter(r=>r.stage===viewStage);
  const artifactPaths=new Set();
- for(const r of runs){for(const a of (r.artifacts||[])){if(a?.path)artifactPaths.add(r.stage+':'+a.path);}}
+ for(const r of stageRuns){for(const a of (r.artifacts||[])){if(a?.path)artifactPaths.add(a.path);}}
  const badgeResults=$('#tab-badge-results');
  if(badgeResults){
   if(artifactPaths.size>0){badgeResults.textContent=String(artifactPaths.size);badgeResults.hidden=false;}
@@ -841,14 +842,15 @@ function renderDeliveryResult(task,runs){
 function renderRuns(runs,task){
  const runsRoot=$('#runs');if(!runsRoot)return;
  const completedRuns=runs.filter(run=>run.status==='completed'&&Boolean(run.summary||run.result));
- const signature=task.id+':'+completedRuns.map(r=>r.id+':'+r.stage+':'+r.status+':'+(r.summary?.length||0)+':'+(r.result?.length||0)+':'+(r.ended_at||r.started_at||0)).join('|');
+ const signature=task.id+':'+completedRuns.map(r=>r.id+':'+r.stage+':'+r.status+':'+(r.summary?.length||0)+':'+(r.result?.length||0)+':'+(r.ended_at||r.updated_at||r.started_at||r.created_at||0)).join('|');
  if(signature===runsSignature)return;runsSignature=signature;
- runsRoot.replaceChildren(...completedRuns.sort((a,b)=>Number(b.started_at||0)-Number(a.started_at||0)).map(run=>{
+ runsRoot.replaceChildren(...completedRuns.sort((a,b)=>Number(b.started_at||b.created_at||0)-Number(a.started_at||a.created_at||0)).map(run=>{
   const card=el('article',undefined,'run-card');
+  const started=run.started_at||run.created_at,ended=run.ended_at||run.updated_at;
   const contentBox=el('div',undefined,'run-card-collapsible is-collapsed');
   contentBox.append(
    el('h4','阶段执行完成 · '+getStageLabel(run.stage,task)),
-   el('p',`开始：${run.started_at?new Date(run.started_at).toLocaleString():'-'} · 结束：${run.ended_at?new Date(run.ended_at).toLocaleString():'-'}`,'run-meta'),
+   el('p',`开始：${started?new Date(started).toLocaleString():'-'} · 结束：${ended?new Date(ended).toLocaleString():'-'}`,'run-meta'),
    markdown(run.summary||run.result||'')
   );
   const textContent=(run.summary||run.result||'').trim();
@@ -1126,23 +1128,15 @@ let activePreviewBlobUrl = null;
 function renderStageArtifacts(runs){
  const card=$('#artifacts-card'),gallery=$('#artifacts-gallery'),countBadge=$('#artifacts-count');
  if(!card||!gallery)return;
- // Collect artifacts from every stage so completed artifacts remain visible
- // when the user views a later stage.
- const orderedRuns=[...runs].sort((a,b)=>{
-  const sa=stages.indexOf(a.stage),sb=stages.indexOf(b.stage);
-  if(sa!==sb)return sa-sb;
-  return Number(b.started_at||0)-Number(a.started_at||0);
- });
+ // Only show artifacts produced by the stage currently being viewed.
+ const stageRuns=runs.filter(r=>r.stage===viewStage);
  const allArtifacts=[];
  const seenPaths=new Set();
- for(const r of orderedRuns){
+ for(const r of stageRuns.slice().reverse()){
   for(const a of (r.artifacts||[])){
-   if(a&&typeof a.path==='string'){
-    const key=r.stage+':'+a.path;
-    if(!seenPaths.has(key)){
-     seenPaths.add(key);
-     allArtifacts.push({...a,stage:r.stage});
-    }
+   if(a&&typeof a.path==='string'&&!seenPaths.has(a.path)){
+    seenPaths.add(a.path);
+    allArtifacts.push(a);
    }
   }
  }
@@ -1156,7 +1150,7 @@ function renderStageArtifacts(runs){
  if(countBadge)countBadge.textContent=`${allArtifacts.length} 个文件`;
  
  // Check if gallery already rendered same signature
- const signature='all:'+allArtifacts.map(a=>a.stage+':'+a.path+':'+(a.content?a.content.length:0)).join(',');
+ const signature=viewStage+':'+allArtifacts.map(a=>a.path+':'+(a.content?a.content.length:0)).join(',');
  if(gallery.dataset.signature===signature)return;
  gallery.dataset.signature=signature;
  gallery.replaceChildren();
@@ -1249,10 +1243,9 @@ function renderStageArtifacts(runs){
   const cardItem=el('div',undefined,'artifact-card');
   const info=el('div',undefined,'artifact-card-info');
   const badge=el('span',ext.toUpperCase(),'artifact-ext-badge ext-'+ext);
-  const stage=el('span',getStageLabel(item.stage,selected||{}),'artifact-stage');
   const name=el('span',item.path,'artifact-name');
   const size=el('small',`${sizeKb} KB`,'artifact-size');
-  info.append(badge,stage,name,size);
+  info.append(badge,name,size);
 
   const previewBtn=el('button','预览','secondary artifact-btn');
   previewBtn.type='button';

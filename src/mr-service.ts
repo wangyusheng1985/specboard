@@ -205,112 +205,87 @@ export function renderMRDescription(options: {
  changedFiles: string[];
  defaultBranch: string;
  sourceBranch: string;
+ summary?: string;
 }): string {
- const {type, description, taskId, changedFiles, defaultBranch, sourceBranch} = options;
+ const {type, description, taskId, changedFiles, defaultBranch, sourceBranch, summary} = options;
 
  const fileList = changedFiles.length > 0
   ? changedFiles.map(f => `- \`${f}\``).join('\n')
   : '- （无新增修改文件）';
 
  const digest = normalizeMarkdown(description);
- const sections: Record<MRChangeType, string> = {
-  docs: `### 📖 文档更新说明
-
-**变更目标**
-
-${digest}
-
-**核心调整文档**
-
-${fileList}
-
-**验证对照**：确认相关技术规范与最新代码实现保持同步，排版格式完整无误。`,
-
-  fix: `### 🐛 问题修复说明
-
-**问题描述**
-
-${digest}
-
-**涉及组件与文件**
-
-${fileList}
-
-**修复方案**：已消除异常逻辑并在工作区验证通过。
-**回归检查**：相关自动化测试及 CI 流水线均已重新验证。`,
-
-  feat: `### ✨ 功能特性说明
-
-**功能目标**
-
-${digest}
-
-**主要改动文件**
-
-${fileList}
-
-**实现亮点**：按照规划与设计契约完成代码落地，提供完备的测试与运行时保障。
-**影响范围**：合并至 \`${defaultBranch}\` 主分支，不破坏既有兼容性。`,
-
-  refactor: `### 🔨 代码重构说明
-
-**重构目的**
-
-${digest}
-
-**重构范围**
-
-${fileList}
-
-**质量保证**：重构前后保持既有业务逻辑契约完全一致，全量自动化回归测试通过。`,
-
-  perf: `### ⚡ 性能优化说明
-
-**优化点**
-
-${digest}
-
-**优化文件**
-
-${fileList}
-
-**效果预期**：降低资源消耗与响应耗时，通过性能回归检验。`,
-
-  ci: `### 👷 流水线与构建变更
-
-**构建调整**
-
-${digest}
-
-**改动配置**
-
-${fileList}
-
-**验证状态**：本地测试及远程流水线执行通过。`,
-
-  chore: `### 🧹 常规维护与杂项
-
-**维护内容**
-
-${digest}
-
-**涉及文件**
-
-${fileList}`
+ const overview = normalizeMarkdown(summary || digest.split(/\n{2,}/)[0] || digest);
+ const scope = inferMRScope(description, changedFiles);
+ const verification = '- [ ] 相关单元测试通过\n- [ ] 集成 / 回归测试通过\n- [ ] CI 流水线通过';
+ const risk = `- **目标分支**：\`${defaultBranch}\`\n- **兼容性**：保持既有接口与数据契约兼容\n- **回滚方式**：回滚本次合并提交`;
+ const templates: Record<MRChangeType, Array<[string,string]>> = {
+  feat: [
+   ['功能目标', digest],
+   ['主要改动', fileList],
+   ['验收标准', '- [ ] 功能行为符合任务描述\n- [ ] 相关自动化测试通过\n- [ ] CI 流水线通过'],
+   ['测试与验证', verification],
+   ['影响范围与风险', risk],
+  ],
+  fix: [
+   ['问题现象', digest],
+   ['根因分析', '已定位相关逻辑并在本次变更中修复。'],
+   ['修复方案', '见“主要改动”中的文件变更。'],
+   ['主要改动', fileList],
+   ['回归验证', '- [ ] 原问题复现路径验证通过\n- [ ] 相关自动化测试通过\n- [ ] CI 流水线通过'],
+   ['影响范围与风险', risk],
+  ],
+  docs: [
+   ['文档范围', digest],
+   ['更新内容', fileList],
+   ['一致性检查', '- [ ] 文档与代码实现一致\n- [ ] 链接与示例可正常访问'],
+  ],
+  refactor: [
+   ['重构动机', digest],
+   ['重构范围', fileList],
+   ['行为不变说明', '重构保持对外接口与业务行为不变。'],
+   ['测试与验证', verification],
+   ['影响范围与风险', risk],
+  ],
+  perf: [
+   ['性能问题', digest],
+   ['优化方案', fileList],
+   ['基准数据', '请在审查时补充优化前后的基准数据。'],
+   ['回归验证', verification],
+   ['影响范围与风险', risk],
+  ],
+  ci: [
+   ['流水线变更', digest],
+   ['改动配置', fileList],
+   ['触发条件', '- [ ] 目标分支变更触发\n- [ ] 手动触发可用'],
+   ['验证结果', '- [ ] 流水线通过'],
+   ['回滚方式', '回滚本次 CI 配置变更。'],
+  ],
+  chore: [
+   ['维护内容', digest],
+   ['影响范围', fileList],
+   ['验证', '- [ ] 相关检查通过'],
+  ],
  };
 
- return `## 📋 Merge Request 概览
+ const body = (templates[type] || templates.feat).map(([heading, content]) => `## ${heading}\n\n${content}`).join('\n\n');
+ return `## 概述
 
-${sections[type] || sections.feat}
+${overview}
+
+## 变更类型
+
+\`${type}(${scope})\`
+
+${body}
 
 ---
 
-### 🔍 任务与审查元信息
+## 任务信息
+
 - **任务编号**：\`${taskId}\`
-- **源分支**：\`${sourceBranch}\` ➔ **目标分支**：\`${defaultBranch}\`
-- **变更类型**：\`${type}\`
-- **执行代理**：Specboard Autonomous Agent
-`;
+- **源分支**：\`${sourceBranch}\`
+- **目标分支**：\`${defaultBranch}\`
+- **执行代理**：Specboard Autonomous Agent`;
 }
 
 export async function runMRStage(ctx: MRStageContext) {
@@ -408,7 +383,8 @@ export async function runMRStage(ctx: MRStageContext) {
   taskId,
   changedFiles: mrFiles,
   defaultBranch,
-  sourceBranch: branch
+  sourceBranch: branch,
+  summary: mrTitle
  });
 
  // 2. Push branch to remote

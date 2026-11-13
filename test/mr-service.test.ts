@@ -541,7 +541,9 @@ test('detectChangeType and renderMRDescription format type-specific MR titles an
   defaultBranch: 'main',
   sourceBranch: 'specboard/task-doc-1'
  });
- assert.ok(docsDesc.includes('### 📖 文档更新说明'));
+ assert.ok(docsDesc.includes('## 文档范围'));
+ assert.ok(docsDesc.includes('## 更新内容'));
+ assert.ok(docsDesc.includes('## 一致性检查'));
  assert.ok(docsDesc.includes('- `README.md`'));
 
  // 2. Fix detection
@@ -557,7 +559,10 @@ test('detectChangeType and renderMRDescription format type-specific MR titles an
   defaultBranch: 'main',
   sourceBranch: 'specboard/task-fix-1'
  });
- assert.ok(fixDesc.includes('### 🐛 问题修复说明'));
+ assert.ok(fixDesc.includes('## 问题现象'));
+ assert.ok(fixDesc.includes('## 根因分析'));
+ assert.ok(fixDesc.includes('## 修复方案'));
+ assert.ok(fixDesc.includes('## 回归验证'));
 
  // 3. Feat detection (default)
  assert.equal(detectChangeType('增加支持垃圾桶拖拽删除任务'), 'feat');
@@ -570,7 +575,11 @@ test('detectChangeType and renderMRDescription format type-specific MR titles an
   defaultBranch: 'main',
   sourceBranch: 'specboard/task-feat-1'
  });
- assert.ok(featDesc.includes('### ✨ 功能特性说明'));
+ assert.ok(featDesc.includes('## 功能目标'));
+ assert.ok(featDesc.includes('## 主要改动'));
+ assert.ok(featDesc.includes('## 验收标准'));
+ assert.ok(featDesc.includes('## 测试与验证'));
+ assert.ok(featDesc.includes('## 影响范围与风险'));
 });
 
 test('renderMRTitle uses type(scope): English summary bounded to 20 words and 100 characters', async () => {

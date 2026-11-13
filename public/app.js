@@ -669,9 +669,8 @@ async function updateDetail(){
  renderStageArtifacts(runs);
 
  // Update Tab Badges
- const stageRuns=runs.filter(r=>r.stage===viewStage);
  const artifactPaths=new Set();
- for(const r of stageRuns){for(const a of (r.artifacts||[])){if(a?.path)artifactPaths.add(a.path);}}
+ for(const r of runs){for(const a of (r.artifacts||[])){if(a?.path)artifactPaths.add(r.stage+':'+a.path);}}
  const badgeResults=$('#tab-badge-results');
  if(badgeResults){
   if(artifactPaths.size>0){badgeResults.textContent=String(artifactPaths.size);badgeResults.hidden=false;}
@@ -1090,15 +1089,23 @@ let activePreviewBlobUrl = null;
 function renderStageArtifacts(runs){
  const card=$('#artifacts-card'),gallery=$('#artifacts-gallery'),countBadge=$('#artifacts-count');
  if(!card||!gallery)return;
- // Find all artifacts for the currently viewed stage across runs
- const stageRuns=runs.filter(r=>r.stage===viewStage);
+ // Collect artifacts from every stage so completed artifacts remain visible
+ // when the user views a later stage.
+ const orderedRuns=[...runs].sort((a,b)=>{
+  const sa=stages.indexOf(a.stage),sb=stages.indexOf(b.stage);
+  if(sa!==sb)return sa-sb;
+  return Number(b.started_at||0)-Number(a.started_at||0);
+ });
  const allArtifacts=[];
  const seenPaths=new Set();
- for(const r of stageRuns.slice().reverse()){
+ for(const r of orderedRuns){
   for(const a of (r.artifacts||[])){
-   if(a&&typeof a.path==='string'&&!seenPaths.has(a.path)){
-    seenPaths.add(a.path);
-    allArtifacts.push(a);
+   if(a&&typeof a.path==='string'){
+    const key=r.stage+':'+a.path;
+    if(!seenPaths.has(key)){
+     seenPaths.add(key);
+     allArtifacts.push({...a,stage:r.stage});
+    }
    }
   }
  }
@@ -1112,7 +1119,7 @@ function renderStageArtifacts(runs){
  if(countBadge)countBadge.textContent=`${allArtifacts.length} 个文件`;
  
  // Check if gallery already rendered same signature
- const signature=viewStage+':'+allArtifacts.map(a=>a.path+':'+(a.content?a.content.length:0)).join(',');
+ const signature='all:'+allArtifacts.map(a=>a.stage+':'+a.path+':'+(a.content?a.content.length:0)).join(',');
  if(gallery.dataset.signature===signature)return;
  gallery.dataset.signature=signature;
  gallery.replaceChildren();
@@ -1205,9 +1212,10 @@ function renderStageArtifacts(runs){
   const cardItem=el('div',undefined,'artifact-card');
   const info=el('div',undefined,'artifact-card-info');
   const badge=el('span',ext.toUpperCase(),'artifact-ext-badge ext-'+ext);
+  const stage=el('span',getStageLabel(item.stage,selected||{}),'artifact-stage');
   const name=el('span',item.path,'artifact-name');
   const size=el('small',`${sizeKb} KB`,'artifact-size');
-  info.append(badge,name,size);
+  info.append(badge,stage,name,size);
 
   const previewBtn=el('button','预览','secondary artifact-btn');
   previewBtn.type='button';

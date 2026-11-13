@@ -15,6 +15,10 @@ test('detail stepper lets users inspect completed stage data', async () => {
  assert.match(app, /阶段执行完成 · /);
  assert.match(app, /type=user_message&limit=500/);
  assert.match(app, /getStageLabel\(ev\.stage,task\)/);
+ assert.match(app, /const key=r\.stage\+':'\+a\.path/);
+ assert.match(app, /artifact-stage/);
+ assert.doesNotMatch(app, /Find all artifacts for the currently viewed stage/);
  assert.match(css, /\.stepper-step\.viewing\{/);
  assert.match(css, /button\.stepper-step\{/);
+ assert.match(css, /\.artifact-stage\{/);
 });

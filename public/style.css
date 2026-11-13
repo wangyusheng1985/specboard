@@ -227,10 +227,14 @@ dialog.artifact-preview-dialog::backdrop{background:#0f172a88;backdrop-filter:bl
 /* Stage Stepper */
 .detail-stepper{display:flex;align-items:center;gap:8px;margin:2px 0;padding:4px 0;overflow-x:auto}
 .stepper-step{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:550;color:#64748b;white-space:nowrap}
+button.stepper-step{border:0;background:transparent;padding:0;font:inherit;cursor:pointer}
+button.stepper-step:disabled{cursor:default;opacity:.5}
 .stepper-step.active{color:var(--accent);font-weight:650}
 .stepper-step.done{color:var(--success);font-weight:600}
+.stepper-step.viewing{text-decoration:underline;text-underline-offset:3px}
 .stepper-dot{width:7px;height:7px;border-radius:50%;background:#cbd5e1;flex:none;transition:all .2s ease}
 .stepper-step.active .stepper-dot{background:var(--accent);box-shadow:0 0 0 3px rgba(70,86,216,.2)}
+.stepper-step.viewing .stepper-dot{background:var(--accent)}
 .stepper-step.done .stepper-dot{background:var(--success)}
 .stepper-arrow{color:#cbd5e1;font-size:11px;margin:0 2px}
 

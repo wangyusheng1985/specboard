@@ -744,13 +744,22 @@ document.querySelectorAll('.detail-tab-btn').forEach(btn=>{
 function renderDetailStepper(task){
  const root=$('#detail-stepper');if(!root)return;
  const currentIdx=stages.indexOf(task.stage);
+ const viewingIdx=stages.indexOf(viewStage);
  const items=stages.map((stg,idx)=>{
   const label=getStageLabel(stg,task);
   const isDone=currentIdx>idx;
   const isCurrent=currentIdx===idx;
-  const step=el('div',undefined,'stepper-step'+(isCurrent?' active':isDone?' done':''));
-  const dot=el('span',undefined,'stepper-dot');
-  step.append(dot,el('span',label));
+  const isViewing=viewingIdx===idx;
+  const step=el('button',undefined,'stepper-step'+(isCurrent?' active':isDone?' done':'')+(isViewing?' viewing':''));
+  step.type='button';
+  step.disabled=idx>currentIdx;
+  step.title=idx>currentIdx?'该阶段尚未开始':'查看 '+label+' 阶段数据';
+  step.append(el('span',undefined,'stepper-dot'),el('span',label));
+  step.onclick=()=>{
+   if(idx>currentIdx||viewStage===stg)return;
+   viewStage=stg;
+   void updateDetail();
+  };
   return step;
  });
  root.replaceChildren();

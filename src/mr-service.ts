@@ -87,7 +87,15 @@ export function detectChangeType(description: string, changedFiles: string[] = [
 export function renderMRTitle(type: MRChangeType, description: string): string {
  // Remove existing prefixes if user already typed one
  const cleanDesc = description.replace(/^(?:feat|fix|docs|refactor|perf|ci|chore)(?:\([^)]+\))?[:：]\s*/i, '').trim();
- return `${type}: ${cleanDesc}`;
+ // GitHub and GitLab reject merge request titles longer than 255 characters.
+ // Keep the title to a single line and truncate on code points so surrogate
+ // pairs (emoji) are never split.
+ const firstLine = cleanDesc.split(/\r?\n/, 1)[0].trim();
+ const summary = firstLine || cleanDesc;
+ const prefix = `${type}: `, budget = 255 - prefix.length;
+ const chars = Array.from(summary);
+ if (chars.length <= budget) return `${prefix}${summary}`;
+ return `${prefix}${chars.slice(0, Math.max(0, budget - 1)).join('')}…`;
 }
 
 export function renderMRDescription(options: {

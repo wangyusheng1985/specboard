@@ -565,3 +565,20 @@ test('detectChangeType and renderMRDescription format type-specific MR titles an
  });
  assert.ok(featDesc.includes('### ✨ 功能特性说明'));
 });
+
+test('renderMRTitle stays within the 255-character platform limit', async () => {
+ const {renderMRTitle} = await import('../src/mr-service.ts');
+ const long = '期望增加一个汇总 Token 的能力。'.repeat(40);
+ const title = renderMRTitle('feat', long);
+ assert.ok(Array.from(title).length <= 255, `${Array.from(title).length} characters`);
+ assert.ok(title.startsWith('feat: 期望增加'));
+ assert.ok(title.endsWith('…'));
+
+ const multiline = renderMRTitle('fix', '第一行摘要\n第二行很长的详细说明');
+ assert.equal(multiline, 'fix: 第一行摘要');
+
+ const emoji = renderMRTitle('feat', '🚀'.repeat(400));
+ assert.ok(Array.from(emoji).length <= 255);
+ assert.ok(!emoji.includes('\uFFFD'));
+ assert.ok(emoji.endsWith('…'));
+});

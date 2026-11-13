@@ -611,7 +611,7 @@ async function updateDetail(){
    metaBadge.append(document.createTextNode(`${task.stage} · ${statusLabel}`));
   }
  }
- const deliveryRoot=$('#delivery-result');if(deliveryRoot){deliveryRoot.replaceChildren();if(task.outcome_state==='delivered'&&task.stage==='Apply'){const deliveredRun=runs.filter(run=>run.stage==='Apply'&&run.status==='completed').at(-1),evidence=deliveredRun?.validation||[];deliveryRoot.append(el('h3','实现完成，等待审阅'),el('p',`验证记录：${evidence.length} 条`));}}
+ renderDeliveryResult(task,runs);
  const mrRoot=$('#mr-result');if(mrRoot){mrRoot.replaceChildren();const mr=mrData?.mr;if(mr){const isGitHub=(mr.web_url&&mr.web_url.includes('github.com'))||(selected.repository_url&&selected.repository_url.includes('github.com'));const platformName=isGitHub?'GitHub':'GitLab';const prOrMr=isGitHub?'PR':'MR';const ciOrActions=isGitHub?'Actions':'CI';const card=el('article',undefined,'run-card');const titleRow=el('p',undefined,'run-meta');const linkText=isGitHub?`GitHub PR #${mr.mr_iid||''} · ${mr.title||'Pull Request'}`:`GitLab MR !${mr.mr_iid||''} · ${mr.title||'Merge Request'}`;const link=el('a',linkText);if(mr.web_url){link.href=mr.web_url;link.target='_blank';link.rel='noopener noreferrer';}titleRow.append(link);const branchRow=el('p',`${mr.source_branch} ➔ ${mr.target_branch}`,'run-meta');const pipelinePrefix=isGitHub?'Actions Workflow':'Pipeline';const pipelineText=mr.pipeline_id?`${pipelinePrefix} #${mr.pipeline_id} · ${mr.pipeline_status||'进行中'}`:`${ciOrActions}: 等待触发`;const pipelineBadge=el('span',pipelineText,'badge');card.append(el('h4',`${platformName} ${prOrMr} 与 ${ciOrActions} 状态`),titleRow,branchRow,pipelineBadge);mrRoot.append(card);}}
  const current=stages.indexOf(task.stage),active=['queued','running'].includes(task.status);
  const proposalReady=task.stage==='Propose'&&proposals.some(p=>p.stage==='Propose'&&p.version===task.version&&!p.confirmed)&&!active&&!task.wait_reason;
@@ -799,6 +799,43 @@ function renderTaskOverview(task){
  descTitle.style.marginBottom='8px';
  const descBox=el('div',task.description,'task-desc-box');
  root.append(grid,descTitle,descBox);
+}
+
+function renderDeliveryResult(task,runs){
+ const root=$('#delivery-result');if(!root)return;
+ root.replaceChildren();
+ if(task.outcome_state!=='delivered'||task.stage!=='Apply')return;
+ const deliveredRun=runs.filter(run=>run.stage==='Apply'&&run.status==='completed').at(-1);
+ const evidence=deliveredRun?.validation||[],blockers=deliveredRun?.blockers||[];
+ root.append(el('h3','实现完成，等待审阅'));
+ root.append(el('p','重点审阅：交付摘要、阻塞/后续项、验证记录和阶段过程产物。确认无误后进入下一阶段。','delivery-hint'));
+ if(deliveredRun?.summary){
+  const details=el('details',undefined,'delivery-summary');details.open=true;
+  details.append(el('summary','交付摘要'),markdown(deliveredRun.summary));
+  root.append(details);
+ }else{
+  root.append(el('p','Agent 未提交交付摘要。','empty'));
+ }
+ if(evidence.length){
+  const box=el('div',undefined,'delivery-validation');
+  box.append(el('h4',`验证记录（${evidence.length} 条）`));
+  evidence.forEach((item,index)=>{
+   const row=el('div',undefined,'delivery-validation-item');
+   row.append(el('p',`${index+1}. ${String(item.command||'验证命令').replace(/^stage-verification:/,'阶段校验：')}`));
+   row.append(el('small',`退出码 ${item.exitCode ?? '-'}${item.summary?` · ${item.summary}`:''}`));
+   box.append(row);
+  });
+  box.append(el('p','详细命令输出可在「执行历史」和「会话与指令」中查看。','run-meta'));
+  root.append(box);
+ }else{
+  root.append(el('p','暂无验证记录。','empty'));
+ }
+ if(blockers.length){
+  const box=el('div',undefined,'delivery-blockers');
+  box.append(el('h4','阻塞项 / 后续项'));
+  for(const blocker of blockers)box.append(el('p',typeof blocker==='string'?blocker:JSON.stringify(blocker)));
+  root.append(box);
+ }
 }
 
 function renderRuns(runs,task){

@@ -556,3 +556,13 @@ button.stepper-step:disabled{cursor:default;opacity:.5}
  .diag-copy-btn{transition:none!important}
 }
 
+
+.delivery-hint{font-size:13px;color:var(--muted);margin:4px 0 12px}
+.delivery-summary{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:10px 0;background:var(--surface-2)}
+.delivery-summary>summary{cursor:pointer;font-weight:650;color:var(--ink);margin-bottom:8px}
+.delivery-validation{margin:14px 0}
+.delivery-validation h4,.delivery-blockers h4{margin:0 0 8px}
+.delivery-validation-item{border-left:3px solid var(--line);padding:6px 10px;margin:6px 0;background:var(--surface-2);border-radius:6px}
+.delivery-validation-item p{margin:0 0 4px;font-size:13px}
+.delivery-validation-item small{color:var(--muted);font-size:11.5px}
+.delivery-blockers{border:1px solid #fde68a;background:#fffbeb;border-radius:10px;padding:12px 14px;margin:12px 0}

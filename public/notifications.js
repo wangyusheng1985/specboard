@@ -51,7 +51,11 @@ export function notificationPayload(task,type,origin=''){
  return {title:'Specboard · '+notificationTypes[type],options:{body:`${name} · ${task.stage} ${state}`,icon:'/apple-touch-icon.png',tag:`task:${task.id}:${type}`,data:{url:`${origin}/?task=${task.id}&stage=${task.stage}`}}};
 }
 export function createNotificationAdapter(env=globalThis,storage,channel){
- let enabled=preference(storage)==='enabled';const seen=new Set(keys(storage));
+ // A browser grant is enough to enable notifications; only an explicit
+ // in-app disable should keep them off.
+ let explicit;try{explicit=storage?.getItem(PREF);}catch{}
+ let enabled=explicit==='enabled'||(explicit!=='disabled'&&permission(env)==='granted');
+ const seen=new Set(keys(storage));
  const previousHandler=channel?.onmessage;
  if(channel)channel.onmessage=event=>{const key=event.data?.key;if(event.data?.type==='notification-key'&&typeof key==='string'&&key.length<400){seen.add(key);while(seen.size>MAX_KEYS)seen.delete(seen.values().next().value);}previousHandler?.(event);};
  return {

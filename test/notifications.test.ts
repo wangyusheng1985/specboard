@@ -44,3 +44,13 @@ test('first observation notifies current actionable tasks exactly once', async (
  observer.observe([{...base,stage:'Apply',outcome_state:'blocked',outcome_revision:3,updated_at:3}]);
  assert.equal(notifications.length,2,'reset should establish a new initial notification');
 });
+
+test('granted browser permission enables notifications unless explicitly disabled', () => {
+ const {env}=environment();
+ env.Notification.permission='granted';
+ const store=storage();
+ const adapter=createNotificationAdapter(env,store);
+ assert.equal(adapter.enabled(),true,'granted permission should enable notifications');
+ adapter.disable();
+ assert.equal(createNotificationAdapter(env,store).enabled(),false,'explicit disable should win');
+});

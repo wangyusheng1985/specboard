@@ -108,13 +108,19 @@ export class RuntimeService{
   const report=(await db.query('SELECT report FROM run_artifact_reports WHERE run_id=$1',[row.run_id])).rows[0]?.report;
   const run=await this.enqueue(db,task);await db.query('INSERT INTO run_recoveries(run_id,diagnostic_id,intent) VALUES($1,$2,$3)',[run.id,row.id,JSON.stringify({action:body.action,additionalContext:body.additionalContext||'',report})]);return run;
  }
+ async markStopped(db:pg.PoolClient,taskId:string,activeRunId?:string){
+  const now=Date.now();
+  await db.query("UPDATE agent_runs SET status='stopped',step_lock=NULL,lease_expires_at=$2,updated_at=$2 WHERE task_id=$1 AND (id=$3 OR status IN ('queued','claimed','running','waiting_input','awaiting_answers','paused','interrupted','failed'))",[taskId,now,activeRunId||null]);
+  await db.query("UPDATE tasks SET status='stopped',outcome_state='stopped',wait_reason=NULL,outcome_revision=outcome_revision+1,updated_at=$2 WHERE id=$1",[taskId,now]);
+ }
+
  async command(db:pg.PoolClient,taskId:string,type:string,payload:any){
   await db.query('SELECT id FROM tasks WHERE id=$1 FOR UPDATE',[taskId]);const task=await this.task(taskId,db);
   const run=(await db.query("SELECT * FROM agent_runs WHERE task_id=$1 AND status IN ('queued','claimed','running','waiting_input') ORDER BY created_at DESC LIMIT 1",[taskId])).rows[0];
   const pending=(await db.query("SELECT id FROM clarification_batches WHERE task_id=$1 AND status IN ('pending','submitted')",[taskId])).rows[0];
   if(pending&&type==='pause')return {status:'waiting_input'};
   if(pending&&type!=='stop')throw new ApiError(409,'clarification_required','Answer pending questions before continuing');
-  if(pending&&type==='stop'){await db.query("UPDATE clarification_batches SET status='superseded' WHERE task_id=$1 AND status IN ('pending','submitted')",[taskId]);await db.query("UPDATE agent_runs SET status='stopped',step_lock=NULL WHERE task_id=$1 AND status IN ('waiting_input','awaiting_answers')",[taskId]);await db.query("UPDATE tasks SET status='stopped',wait_reason=NULL WHERE id=$1",[taskId]);return {status:'stopped'};}
+  if(pending&&type==='stop'){await db.query("UPDATE clarification_batches SET status='superseded' WHERE task_id=$1 AND status IN ('pending','submitted')",[taskId]);await this.markStopped(db,taskId);return {status:'stopped'};}
   await this.event(db,taskId,run?.id||null,'human_control',{type,payload});
   if(type==='transition'||type==='confirm_transition'){
    if(['failed','interrupted'].includes(task.status))throw new ApiError(409,'stage_incomplete','Recover this stage before advancing');
@@ -133,9 +139,15 @@ export class RuntimeService{
    if(!run)return this.enqueue(db,task,payload.text);
   }
   if(['resume','retry'].includes(type)){if(run)throw new ApiError(409,'run_active','Already running');const next=await this.enqueue(db,task,payload.text);await db.query("UPDATE clarification_submissions SET continuation_run=$2 WHERE continuation_run IN (SELECT id FROM agent_runs WHERE task_id=$1 AND stage=$3 AND status IN ('failed','interrupted','paused'))",[taskId,next.id,task.stage]);return next;}
-  if(!run)throw new ApiError(409,'no_active_run','No active run');
-  if(['pause','stop'].includes(type)&&run.status==='queued'){await db.query('UPDATE agent_runs SET status=$2 WHERE id=$1',[run.id,type==='pause'?'paused':'stopped']);await db.query('UPDATE tasks SET status=$2 WHERE id=$1',[taskId,type==='pause'?'paused':'stopped']);return {status:type==='pause'?'paused':'stopped'};}
-  const id=randomUUID();await db.query("INSERT INTO run_commands(id,run_id,type,payload,status,created_at) VALUES($1,$2,$3,$4,'queued',$5)",[id,run.id,type,JSON.stringify(payload),Date.now()]);return {id,status:'queued'};
+  if(!run){
+   if(type!=='stop')throw new ApiError(409,'no_active_run','No active run');
+   await this.markStopped(db,taskId);
+   return {status:'stopped'};
+  }
+  if(['pause','stop'].includes(type)&&run.status==='queued'){await db.query('UPDATE agent_runs SET status=$2,updated_at=$3 WHERE id=$1',[run.id,type==='pause'?'paused':'stopped',Date.now()]);await db.query("UPDATE tasks SET status=$2,outcome_state=$2,wait_reason=NULL,outcome_revision=outcome_revision+1,updated_at=$3 WHERE id=$1",[taskId,type==='pause'?'paused':'stopped',Date.now()]);return {status:type==='pause'?'paused':'stopped'};}
+  const id=randomUUID();await db.query("INSERT INTO run_commands(id,run_id,type,payload,status,created_at) VALUES($1,$2,$3,$4,'queued',$5)",[id,run.id,type,JSON.stringify(payload),Date.now()]);
+  if(type==='stop'){await this.markStopped(db,taskId,run.id);return {id,status:'stopped'};}
+  return {id,status:'queued'};
  }
  async deleteTask(db:pg.PoolClient,taskId:string,paths?:{workspaces?:string;sessions?:string}){
   await db.query('SELECT id FROM tasks WHERE id=$1 FOR UPDATE',[taskId]);
